@@ -1314,6 +1314,79 @@ end`,
 	}
 }
 
+func TestAllVariableFunctionCalls(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want []VariableFunctionCall
+	}{
+		{
+			name: "calls across multiple functions",
+			code: `defmodule M do
+  def first do
+    user = Accounts.get_user(id)
+    user
+  end
+
+  def second do
+    org = Organizations.get_org(slug)
+    org
+  end
+end`,
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "get_user", Arity: 1},
+				{VarName: "org", Module: "Organizations", Function: "get_org", Arity: 1},
+			},
+		},
+		{
+			name: "same variable in two functions emitted twice",
+			code: `def first do
+  user = Accounts.get_user(id)
+end
+
+def second do
+  user = Admins.get_admin(id)
+end`,
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "get_user", Arity: 1},
+				{VarName: "user", Module: "Admins", Function: "get_admin", Arity: 1},
+			},
+		},
+		{
+			name: "ignores module-level code",
+			code: `defmodule M do
+  @some_attr Accounts.get_user(id)
+end`,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens, source, _ := tokenize(tt.code)
+			got := AllVariableFunctionCalls(tokens, source)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d calls %+v, want %d %+v", len(got), got, len(tt.want), tt.want)
+			}
+			for i, want := range tt.want {
+				g := got[i]
+				if g.VarName != want.VarName {
+					t.Errorf("[%d] VarName = %q, want %q", i, g.VarName, want.VarName)
+				}
+				if g.Module != want.Module {
+					t.Errorf("[%d] Module = %q, want %q", i, g.Module, want.Module)
+				}
+				if g.Function != want.Function {
+					t.Errorf("[%d] Function = %q, want %q", i, g.Function, want.Function)
+				}
+				if g.Arity != want.Arity {
+					t.Errorf("[%d] Arity = %d, want %d", i, g.Arity, want.Arity)
+				}
+			}
+		})
+	}
+}
+
 func TestVariableFieldAccessAtCursor(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -3803,6 +3876,18 @@ func TestFindBareFunctionCalls(t *testing.T) {
 			text:     "defp resource_type(%Foo{}), do: \"foo\"\ndefp resource_type(%Bar{}), do: \"bar\"",
 			funcName: "resource_type",
 			want:     nil,
+		},
+		{
+			name:     "capture with arity",
+			text:     "def run(xs) do\n  Stream.map(xs, &normalize/1)\nend\n\ndefp normalize(x), do: x",
+			funcName: "normalize",
+			want:     []int{2},
+		},
+		{
+			name:     "capture without parens definition",
+			text:     "def go(xs), do: Enum.map(xs, &foo/1)\n\ndefp foo(x), do: x",
+			funcName: "foo",
+			want:     []int{1},
 		},
 	}
 	for _, tt := range tests {

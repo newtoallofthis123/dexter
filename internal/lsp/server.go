@@ -1504,9 +1504,7 @@ func (s *Server) prewarmStructFieldsFromText(_ string, filePath, text string) {
 
 	// Pre-warm from function call return types via ExCk.
 	// Scan the entire file for var = Module.func(...) patterns.
-	lines := strings.Count(text, "\n")
-	endCol := len(text)
-	calls := tf.VariableFunctionCalls(lines, endCol)
+	calls := tf.AllVariableFunctionCalls()
 	for _, call := range calls {
 		aliases := tf.ExtractAliasesInScope(call.Line)
 		s.mergeAliasesFromUseTokenized(tf, aliases)
@@ -2157,12 +2155,16 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 				return
 			}
 			seen[varName] = true
-			items = append(items, protocol.CompletionItem{
-				Label:    varName,
-				Kind:     protocol.CompletionItemKindVariable,
-				Detail:   "variable",
-				SortText: "000_" + varName,
-			})
+			item := protocol.CompletionItem{
+				Label:  varName,
+				Kind:   protocol.CompletionItemKindVariable,
+				Detail: "variable",
+			}
+			// In struct value positions a variable is the likely target; sort it first.
+			if structValueContext {
+				item.SortText = "000_" + varName
+			}
+			items = append(items, item)
 		}
 
 		// Variables are usually the intended target in bare value positions.

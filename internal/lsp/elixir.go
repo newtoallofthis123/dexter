@@ -791,10 +791,68 @@ func VariableFunctionCalls(tokens []parser.Token, source []byte, lineStarts []in
 
 	var results []VariableFunctionCall
 	seen := make(map[string]int) // varName -> index in results (last wins)
+	scanVariableFunctionCalls(tokens, source, defIdx+1, offset, &results, seen)
+	return results
+}
 
-	for i := defIdx + 1; i < len(tokens); i++ {
+// AllVariableFunctionCalls scans the whole file and collects variables assigned
+// from module function calls (`var = Module.func(...)`) inside any function
+// body. Each function body has its own scope, so the same variable name in
+// different functions yields separate entries.
+func (tf *TokenizedFile) AllVariableFunctionCalls() []VariableFunctionCall {
+	return AllVariableFunctionCalls(tf.tokens, tf.source)
+}
+
+func AllVariableFunctionCalls(tokens []parser.Token, source []byte) []VariableFunctionCall {
+	n := len(tokens)
+	var results []VariableFunctionCall
+
+	for defIdx := 0; defIdx < n; defIdx++ {
+		if !isFunctionDefinitionToken(tokens[defIdx].Kind) {
+			continue
+		}
+		// Find the end of this function body: the next function definition or EOF.
+		endIdx := n
+		for j := defIdx + 1; j < n; j++ {
+			if tokens[j].Kind == parser.TokEOF {
+				endIdx = j
+				break
+			}
+			if isFunctionDefinitionToken(tokens[j].Kind) {
+				endIdx = j
+				break
+			}
+		}
+		endOffset := -1
+		if endIdx < n {
+			endOffset = tokens[endIdx].Start
+		}
+		seen := make(map[string]int)
+		scanVariableFunctionCalls(tokens, source, defIdx+1, endOffset, &results, seen)
+		defIdx = endIdx - 1
+	}
+	return results
+}
+
+// scanVariableFunctionCalls walks tokens from startIdx, stopping when a token's
+// Start reaches endOffset (use -1 for "no limit"), and appends any
+// `var = Module.func(...)` patterns it recognises. The `seen` map is scoped to
+// the caller so it can choose per-call or shared "last-wins" semantics.
+func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, endOffset int, results *[]VariableFunctionCall, seen map[string]int) {
+	n := len(tokens)
+	pastEnd := func(idx int) bool {
+		if idx >= n {
+			return true
+		}
+		if endOffset >= 0 && tokens[idx].Start >= endOffset {
+			return true
+		}
+		return false
+	}
+
+	for i := startIdx; i < n; i++ {
 		tok := tokens[i]
-		if tok.Kind == parser.TokEOF || tok.Start >= offset {
+		if tok.Kind == parser.TokEOF || pastEnd(i) {
 			break
 		}
 
@@ -808,38 +866,34 @@ func VariableFunctionCalls(tokens []parser.Token, source []byte, lineStarts []in
 			continue
 		}
 
-		// Next must be =
-		eqIdx := tokNextSig(tokens, len(tokens), i+1)
-		if eqIdx >= len(tokens) || tokens[eqIdx].Start >= offset {
+		eqIdx := tokNextSig(tokens, n, i+1)
+		if pastEnd(eqIdx) {
 			continue
 		}
 		if tokens[eqIdx].Kind != parser.TokOther || tokenText(source, tokens[eqIdx]) != "=" {
 			continue
 		}
 
-		// Next must be Module (uppercase)
-		modIdx := tokNextSig(tokens, len(tokens), eqIdx+1)
-		if modIdx >= len(tokens) || tokens[modIdx].Start >= offset {
+		modIdx := tokNextSig(tokens, n, eqIdx+1)
+		if pastEnd(modIdx) {
 			continue
 		}
 		if tokens[modIdx].Kind != parser.TokModule {
 			continue
 		}
 
-		// Collect the full module name (e.g. "MyApp.Accounts")
-		moduleRef, afterMod := tokCollectModuleName(source, tokens, len(tokens), modIdx)
+		moduleRef, afterMod := tokCollectModuleName(source, tokens, n, modIdx)
 		if moduleRef == "" {
 			continue
 		}
 
-		// Next must be . then function name
-		dotIdx := tokNextSig(tokens, len(tokens), afterMod)
-		if dotIdx >= len(tokens) || tokens[dotIdx].Kind != parser.TokDot {
+		dotIdx := tokNextSig(tokens, n, afterMod)
+		if dotIdx >= n || tokens[dotIdx].Kind != parser.TokDot {
 			continue
 		}
 
-		funcIdx := tokNextSig(tokens, len(tokens), dotIdx+1)
-		if funcIdx >= len(tokens) || tokens[funcIdx].Start >= offset {
+		funcIdx := tokNextSig(tokens, n, dotIdx+1)
+		if pastEnd(funcIdx) {
 			continue
 		}
 		if tokens[funcIdx].Kind != parser.TokIdent {
@@ -847,22 +901,19 @@ func VariableFunctionCalls(tokens []parser.Token, source []byte, lineStarts []in
 		}
 		funcName := parser.TokenText(source, tokens[funcIdx])
 
-		// Check if next token is ( for parenthesized call, or an argument for no-paren call
-		nextIdx := tokNextSig(tokens, len(tokens), funcIdx+1)
+		nextIdx := tokNextSig(tokens, n, funcIdx+1)
 		var arity int
 		var skipTo int
 
-		if nextIdx < len(tokens) && tokens[nextIdx].Kind == parser.TokOpenParen {
-			// Parenthesized call: count args inside parens
-			arity = countCallArity(tokens, source, nextIdx)
+		if nextIdx < n && tokens[nextIdx].Kind == parser.TokOpenParen {
+			arity = countCallArity(tokens, nextIdx)
 			closeIdx := findMatchingCloseParen(tokens, nextIdx)
 			if closeIdx >= 0 {
 				skipTo = closeIdx
 			} else {
 				skipTo = nextIdx
 			}
-		} else if nextIdx < len(tokens) && isCallArgStartToken(tokens[nextIdx].Kind) {
-			// No-paren call: count args until newline or closing delimiter
+		} else if nextIdx < n && isCallArgStartToken(tokens[nextIdx].Kind) {
 			arity, skipTo = countNoParenCallArity(tokens, nextIdx)
 		} else {
 			continue
@@ -877,16 +928,14 @@ func VariableFunctionCalls(tokens []parser.Token, source []byte, lineStarts []in
 		}
 
 		if idx, ok := seen[varName]; ok {
-			results[idx] = call
+			(*results)[idx] = call
 		} else {
-			seen[varName] = len(results)
-			results = append(results, call)
+			seen[varName] = len(*results)
+			*results = append(*results, call)
 		}
 
 		i = skipTo
 	}
-
-	return results
 }
 
 // isCallArgStartToken returns true if the token kind can start a function argument
@@ -949,7 +998,7 @@ func countNoParenCallArity(tokens []parser.Token, firstArg int) (int, int) {
 
 // countCallArity counts the number of arguments in a function call starting
 // at the open paren. Returns 0 for empty parens, 1+ for calls with arguments.
-func countCallArity(tokens []parser.Token, source []byte, openParen int) int {
+func countCallArity(tokens []parser.Token, openParen int) int {
 	depth := 1
 	hasContent := false
 	commas := 0
@@ -3189,6 +3238,15 @@ func FindBareFunctionCalls(text string, functionName string) []int {
 				if tokens[k].Kind != parser.TokEOL && tokens[k].Kind != parser.TokComment {
 					break
 				}
+			}
+		}
+		// Check for function capture: &functionName/arity
+		if !isCall && i > 0 && j < n &&
+			tokens[i-1].Kind == parser.TokOther && parser.TokenText(source, tokens[i-1]) == "&" &&
+			tokens[j].Kind == parser.TokOther && parser.TokenText(source, tokens[j]) == "/" {
+			k := tokNextSig(tokens, n, j+1)
+			if k < n && tokens[k].Kind == parser.TokNumber {
+				isCall = true
 			}
 		}
 
