@@ -578,6 +578,81 @@ func TestFormatterServer_UmbrellaStylerPlugin(t *testing.T) {
 	}
 }
 
+func TestFormatterServer_NestedBuildSiblingProject(t *testing.T) {
+	if _, err := exec.LookPath("mix"); err != nil {
+		t.Skip("mix not available in PATH")
+	}
+
+	// Ensure the Styler fixture is compiled so we have beam files to reuse.
+	monorepo := fixtureMonorepoPath(t)
+	stylerFixture := filepath.Join(monorepo, "apps", "app_with_styler")
+	ensureFixtureDeps(t, stylerFixture)
+
+	// Monorepo where the project being edited (libs/remote-library) has no
+	// _build of its own, but a sibling sub-project (apps/tiger) does. This
+	// matches a real layout we saw in the wild, where deps were compiled in
+	// a sibling app instead of at the repo root.
+	projectRoot := t.TempDir()
+	siblingApp := filepath.Join(projectRoot, "apps", "tiger")
+	if err := os.MkdirAll(siblingApp, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(stylerFixture, "_build"), filepath.Join(siblingApp, "_build")); err != nil {
+		t.Fatal(err)
+	}
+
+	editedLib := filepath.Join(projectRoot, "libs", "remote-library")
+	if err := os.MkdirAll(filepath.Join(editedLib, "lib"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(editedLib, "mix.exs"),
+		[]byte("defmodule Remote.MixProject do\n  use Mix.Project\n  def project, do: [app: :remote, version: \"0.1.0\"]\nend\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(editedLib, ".formatter.exs"),
+		[]byte("[plugins: [Styler], inputs: [\"{lib,test}/**/*.{ex,exs}\"]]\n"),
+		0644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	storeDir := t.TempDir()
+	s, err := store.Open(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	server := NewServer(s, projectRoot)
+	if p, err := exec.LookPath("mix"); err == nil {
+		server.mixBin = p
+	}
+
+	unformatted := "defmodule Test do\n  def hello(x) do\n    x |> to_string()\n  end\nend\n"
+	filePath := filepath.Join(editedLib, "lib", "test.ex")
+	docURI := string(uri.File(filePath))
+	server.docs.Set(docURI, unformatted)
+
+	edits, err := server.Formatting(context.Background(), &protocol.DocumentFormattingParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: protocol.DocumentURI(docURI)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edits == nil {
+		t.Fatal("expected formatting edits from Styler via sibling _build, got nil")
+	}
+	if !strings.Contains(edits[0].NewText, "to_string(x)") {
+		t.Errorf("expected Styler to rewrite pipe via sibling _build, got:\n%s", edits[0].NewText)
+	}
+	if strings.Contains(edits[0].NewText, "|>") {
+		t.Errorf("expected Styler to remove single pipe via sibling _build, got:\n%s", edits[0].NewText)
+	}
+}
+
 func TestComputeMinimalEdits(t *testing.T) {
 	t.Run("identical text returns nil", func(t *testing.T) {
 		edits := computeMinimalEdits("hello\nworld\n", "hello\nworld\n")

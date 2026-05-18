@@ -88,12 +88,33 @@ build_root =
     end
   end)
 
-# Add the project's compiled deps to the code path so plugins are available
-# without needing Mix.install
-build_root
-|> Path.join("_build/dev/lib/*/ebin")
-|> Path.wildcard()
-|> Enum.each(&Code.prepend_path/1)
+defmodule Dexter.CodePath do
+  # Tries the conventional `_build/<env>/lib/*/ebin` layout first; if nothing
+  # is found there, falls back to scanning a couple of levels down for nested
+  # mix projects (e.g. umbrella `apps/<app>/_build`).
+  @envs ["dev", "test", "prod"]
+
+  def prepend_compiled_deps(root) do
+    paths =
+      case ebin_paths(root, "_build") do
+        [] ->
+          ebin_paths(root, "*/_build") ++ ebin_paths(root, "*/*/_build")
+
+        direct ->
+          direct
+      end
+
+    Enum.each(paths, &Code.prepend_path/1)
+  end
+
+  defp ebin_paths(root, build_pattern) do
+    Enum.flat_map(@envs, fn env ->
+      Path.wildcard(Path.join(root, "#{build_pattern}/#{env}/lib/*/ebin"))
+    end)
+  end
+end
+
+Dexter.CodePath.prepend_compiled_deps(build_root)
 
 # Formatter Service
 
@@ -138,11 +159,8 @@ defmodule Dexter.Formatter do
         end
       end)
 
-    # Ensure compiled deps are on the code path so plugins can be loaded
-    project_root
-    |> Path.join("_build/dev/lib/*/ebin")
-    |> Path.wildcard()
-    |> Enum.each(&Code.prepend_path/1)
+    # Ensure compiled deps are on the code path so plugins can be loaded.
+    Dexter.CodePath.prepend_compiled_deps(project_root)
 
     raw_opts =
       if File.regular?(formatter_exs_path) do
