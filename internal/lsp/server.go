@@ -1373,6 +1373,11 @@ func (s *Server) warmStructFields(key structFieldCacheKey, generation uint64) {
 	tCache := s.debugNow()
 	s.structFieldMu.Lock()
 	if generation != s.structFieldGen {
+		// Cache was invalidated during lookup (likely a different module).
+		// Reset loading so future requests can retry this key.
+		if entry := s.structFieldCache[key]; entry != nil {
+			entry.loading = false
+		}
 		s.structFieldMu.Unlock()
 		if s.debug {
 			s.debugf("StructFields lookup discarded")
