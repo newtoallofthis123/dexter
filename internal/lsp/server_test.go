@@ -945,6 +945,111 @@ end`)
 	}
 }
 
+func TestCompletion_VariableDotFromEctoMulti(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Use the app_with_ecto_migration project which has compiled Ecto beams.
+	projectRoot, err := filepath.Abs(filepath.Join("testdata", "monorepo", "apps", "app_with_ecto_migration"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.projectRoot = projectRoot
+
+	path := filepath.Join(projectRoot, "lib", "controller.ex")
+	uriStr := string(uri.File(path))
+	server.docs.Set(uriStr, `defmodule MyApp.Controller do
+  def run do
+    multi = Ecto.Multi.new()
+    multi.
+  end
+end`)
+
+	buildRoot := server.structFieldBuildRoot(path)
+	t.Logf("buildRoot: %s", buildRoot)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bp := server.getBeamProcess(ctx, buildRoot)
+	if bp == nil {
+		t.Skip("BEAM process not available")
+	}
+	if err := bp.Ready(ctx); err != nil {
+		t.Skipf("BEAM process not ready: %v", err)
+	}
+
+	// Verify that ExCk can resolve Ecto.Multi.new/0 -> Ecto.Multi
+	structModule, err := bp.ReturnTypeStruct(ctx, "Ecto.Multi", "new", 0)
+	if err != nil || structModule == "" {
+		t.Fatalf("ReturnTypeStruct(Ecto.Multi.new/0) = (%q, %v), want (Ecto.Multi, nil)", structModule, err)
+	}
+
+	// Don't manually pre-warm the cache — test the real on-demand path.
+	// First completion call spawns warmStructFields in the background,
+	// so the initial result is typically empty (cold miss). Retry once.
+	items := completionAt(t, server, uriStr, 3, uint32(len("    multi.")))
+
+	t.Logf("Completion items (first call): %d", len(items))
+	if len(items) == 0 {
+		t.Log("cold miss (expected), retrying after warm-up...")
+		time.Sleep(500 * time.Millisecond)
+		items = completionAt(t, server, uriStr, 3, uint32(len("    multi.")))
+		t.Logf("Completion items (second call): %d", len(items))
+	}
+
+	// Check for known Ecto.Multi struct fields
+	if !hasCompletionItem(items, "names") && !hasCompletionItem(items, "operations") {
+		t.Errorf("expected Ecto.Multi struct fields (names, operations), got %d items", len(items))
+		for _, it := range items {
+			t.Logf("  item: label=%q detail=%q", it.Label, it.Detail)
+		}
+	}
+}
+
+func TestCompletion_StructLiteral_EctoMulti(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	projectRoot, err := filepath.Abs(filepath.Join("testdata", "monorepo", "apps", "app_with_ecto_migration"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.projectRoot = projectRoot
+
+	path := filepath.Join(projectRoot, "lib", "controller.ex")
+	uriStr := string(uri.File(path))
+	server.docs.Set(uriStr, `defmodule MyApp.Controller do
+  def run do
+    %Ecto.Multi{}
+  end
+end`)
+
+	buildRoot := server.structFieldBuildRoot(path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bp := server.getBeamProcess(ctx, buildRoot)
+	if bp == nil {
+		t.Skip("BEAM process not available")
+	}
+	if err := bp.Ready(ctx); err != nil {
+		t.Skipf("BEAM process not ready: %v", err)
+	}
+
+	// Manually warm the cache so the first call succeeds.
+	rawFields, err := bp.StructFields(ctx, "Ecto.Multi")
+	if err != nil || len(rawFields) == 0 {
+		t.Skipf("could not fetch Ecto.Multi struct fields: err=%v", err)
+	}
+	key := structFieldCacheKey{buildRoot: buildRoot, module: "Ecto.Multi"}
+	server.structFieldMu.Lock()
+	server.structFieldCache[key] = &structFieldCacheEntry{fields: rawFields, loaded: true}
+	server.structFieldMu.Unlock()
+
+	items := completionAt(t, server, uriStr, 2, uint32(len("    %Ecto.Multi{")))
+	if !hasCompletionItem(items, "names") && !hasCompletionItem(items, "operations") {
+		t.Errorf("expected Ecto.Multi struct fields, got %d items", len(items))
+	}
+}
+
 func TestStructFieldPrewarmFromDocument(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()

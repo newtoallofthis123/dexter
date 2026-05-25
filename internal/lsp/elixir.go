@@ -403,6 +403,23 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 				continue
 			}
 
+			// Pattern C: %Module{var | ...} — struct update syntax.
+			firstInside := tokNextSig(tokens, len(tokens), braceIdx+1)
+			if firstInside < len(tokens) && tokens[firstInside].Start < offset &&
+				tokens[firstInside].Kind == parser.TokIdent {
+				pipeIdx := tokNextSig(tokens, len(tokens), firstInside+1)
+				if pipeIdx < len(tokens) && tokens[pipeIdx].Kind == parser.TokOther &&
+					parser.TokenText(source, tokens[pipeIdx]) == "|" {
+					updateVarName := parser.TokenText(source, tokens[firstInside])
+					if !strings.HasPrefix(updateVarName, "_") && !parser.IsElixirKeyword(updateVarName) {
+						// Only set if not already matched (spec takes lower priority)
+						if _, exists := result[updateVarName]; !exists {
+							result[updateVarName] = moduleRef
+						}
+					}
+				}
+			}
+
 			// Pattern A: %Module{...} = var (or %Module{...} = var = ...)
 			// Look for = after the struct, then a variable
 			afterClose := tokNextSig(tokens, len(tokens), closeIdx+1)
@@ -486,16 +503,37 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 
 // knownNonStructTypes lists modules whose .t() type does not represent a struct.
 var knownNonStructTypes = map[string]bool{
-	"String":    true,
-	"Integer":   true,
-	"Float":     true,
-	"Atom":      true,
-	"BitString": true,
-	"Reference": true,
-	"Port":      true,
-	"PID":       true,
-	"Exception": true,
-	"Macro":     true,
+	"String":            true,
+	"Integer":           true,
+	"Float":             true,
+	"Atom":              true,
+	"BitString":         true,
+	"Reference":         true,
+	"Port":              true,
+	"PID":               true,
+	"Exception":         true,
+	"Macro":             true,
+	"URI":               true,
+	"Regex":             true,
+	"Range":             true,
+	"MapSet":            true,
+	"Date":              true,
+	"Time":              true,
+	"NaiveDateTime":     true,
+	"DateTime":          true,
+	"File.Stat":         true,
+	"IO.Stream":         true,
+	"Keyword":           true,
+	"Map":               true,
+	"Tuple":             true,
+	"List":              true,
+	"Function":          true,
+	"GenServer":         true,
+	"Agent":             true,
+	"Task":              true,
+	"Supervisor":        true,
+	"Registry":          true,
+	"DynamicSupervisor": true,
 }
 
 // parseSpecParamTypes looks backward from defIdx for a preceding @spec and
@@ -627,6 +665,100 @@ func classifySpecType(tokens []parser.Token, source []byte, start, end int) stri
 	}
 
 	return ""
+}
+
+// findSpecReturnType scans tokens for a @spec matching the given function name
+// and arity, and returns the struct module from its return type. Returns
+// "__MODULE__" for bare t(), the module name for Module.t(), or "".
+func findSpecReturnType(tokens []parser.Token, source []byte, funcName string, arity int) string {
+	n := len(tokens)
+	for i := 0; i < n; i++ {
+		if tokens[i].Kind != parser.TokAttrSpec {
+			continue
+		}
+		// After @spec, expect: func_name ( params ) :: return_type
+		nameIdx := tokNextSig(tokens, n, i+1)
+		if nameIdx >= n || tokens[nameIdx].Kind != parser.TokIdent {
+			continue
+		}
+		if parser.TokenText(source, tokens[nameIdx]) != funcName {
+			continue
+		}
+
+		parenIdx := tokNextSig(tokens, n, nameIdx+1)
+		if parenIdx >= n || tokens[parenIdx].Kind != parser.TokOpenParen {
+			// Zero-arity spec without parens: @spec func :: return_type
+			if parenIdx < n && tokens[parenIdx].Kind == parser.TokDoubleColon && arity == 0 {
+				return parseSpecReturnType(tokens, source, n, parenIdx)
+			}
+			continue
+		}
+
+		closeIdx := findMatchingCloseParen(tokens, parenIdx)
+		if closeIdx < 0 {
+			continue
+		}
+
+		// Check arity matches.
+		specArity := countSpecParamArity(tokens, parenIdx, closeIdx)
+		if specArity != arity {
+			continue
+		}
+
+		// Find :: after the close paren.
+		colonIdx := tokNextSig(tokens, n, closeIdx+1)
+		if colonIdx >= n || tokens[colonIdx].Kind != parser.TokDoubleColon {
+			continue
+		}
+
+		return parseSpecReturnType(tokens, source, n, colonIdx)
+	}
+	return ""
+}
+
+// countSpecParamArity counts parameters in a spec between openParen and closeParen
+// (both exclusive). Returns 0 for empty parens.
+func countSpecParamArity(tokens []parser.Token, openParen, closeParen int) int {
+	n := len(tokens)
+	first := tokNextSig(tokens, n, openParen+1)
+	if first == closeParen {
+		return 0
+	}
+	commas := 0
+	depth := 0
+	for i := openParen + 1; i < closeParen; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenParen, parser.TokOpenBracket, parser.TokOpenBrace:
+			depth++
+		case parser.TokCloseParen, parser.TokCloseBracket, parser.TokCloseBrace:
+			depth--
+		case parser.TokComma:
+			if depth == 0 {
+				commas++
+			}
+		}
+	}
+	return commas + 1
+}
+
+// parseSpecReturnType extracts the struct module from a spec return type starting
+// after ::. Uses classifySpecType to recognise t() and Module.t() patterns.
+func parseSpecReturnType(tokens []parser.Token, source []byte, n int, colonIdx int) string {
+	retStart := tokNextSig(tokens, n, colonIdx+1)
+	if retStart >= n {
+		return ""
+	}
+	// Find end of return type — stop at EOL, EOF, comment, 'when', or end of line.
+	retEnd := retStart
+	for retEnd < n {
+		t := tokens[retEnd]
+		if t.Kind == parser.TokEOL || t.Kind == parser.TokEOF ||
+			t.Kind == parser.TokComment || t.Kind == parser.TokWhen {
+			break
+		}
+		retEnd++
+	}
+	return classifySpecType(tokens, source, retStart, retEnd)
 }
 
 // parseFunctionParamNames extracts parameter names from a function definition
@@ -846,88 +978,162 @@ func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, e
 		return false
 	}
 
+	// tryMatchModuleDotFuncCall attempts to match Module.func(args) at startIdx.
+	// Returns moduleRef, funcName, arity, skipTo, ok.
+	tryMatchModuleDotFuncCall := func(start int) (moduleRef, funcName string, arity, skipTo int, ok bool) {
+		if start >= n || tokens[start].Kind != parser.TokModule {
+			return "", "", 0, start, false
+		}
+		moduleRef, afterMod := tokCollectModuleName(source, tokens, n, start)
+		if moduleRef == "" {
+			return "", "", 0, start, false
+		}
+		dotIdx := tokNextSig(tokens, n, afterMod)
+		if dotIdx >= n || tokens[dotIdx].Kind != parser.TokDot {
+			return "", "", 0, start, false
+		}
+		funcIdx := tokNextSig(tokens, n, dotIdx+1)
+		if funcIdx >= n || tokens[funcIdx].Kind != parser.TokIdent {
+			return "", "", 0, start, false
+		}
+		funcName = parser.TokenText(source, tokens[funcIdx])
+		a, s, ok := readCallArgs(tokens, n, funcIdx)
+		if !ok {
+			return "", "", 0, start, false
+		}
+		return moduleRef, funcName, a, s, true
+	}
+
+	// skipBareFuncCall attempts to skip past ident(args). Returns the skipTo
+	// index (close paren or last arg token), and true if args were found.
+	skipBareFuncCall := func(start int) (int, bool) {
+		if start >= n || tokens[start].Kind != parser.TokIdent {
+			return start, false
+		}
+		_, s, ok := readCallArgs(tokens, n, start)
+		return s, ok
+	}
+
 	for i := startIdx; i < n; i++ {
 		tok := tokens[i]
 		if tok.Kind == parser.TokEOF || pastEnd(i) {
 			break
 		}
 
-		// Look for: ident = Module.func(...)
-		if tok.Kind != parser.TokIdent {
+		// Look for = or <- operators (assignment or with/case match).
+		isAssign := tok.Kind == parser.TokOther && parser.TokenText(source, tok) == "="
+		isMatch := tok.Kind == parser.TokLeftArrow
+		if !isAssign && !isMatch {
 			continue
 		}
 
-		varName := parser.TokenText(source, tok)
-		if strings.HasPrefix(varName, "_") || parser.IsElixirKeyword(varName) {
+		eqIdx := i
+
+		// Collect variable names from the left side pattern.
+		patternStart := prevSignificantToken(tokens, eqIdx)
+		varNames := collectPatternVarNames(tokens, source, patternStart, eqIdx)
+		if len(varNames) == 0 {
 			continue
 		}
 
-		eqIdx := tokNextSig(tokens, n, i+1)
-		if pastEnd(eqIdx) {
-			continue
-		}
-		if tokens[eqIdx].Kind != parser.TokOther || parser.TokenText(source, tokens[eqIdx]) != "=" {
-			continue
-		}
-
-		modIdx := tokNextSig(tokens, n, eqIdx+1)
-		if pastEnd(modIdx) {
-			continue
-		}
-		if tokens[modIdx].Kind != parser.TokModule {
+		// After = or <-, try to match a function call.
+		callIdx := tokNextSig(tokens, n, eqIdx+1)
+		if pastEnd(callIdx) {
 			continue
 		}
 
-		moduleRef, afterMod := tokCollectModuleName(source, tokens, n, modIdx)
-		if moduleRef == "" {
-			continue
-		}
+		var moduleRef, funcName string
+		var arity, skipTo int
 
-		dotIdx := tokNextSig(tokens, n, afterMod)
-		if dotIdx >= n || tokens[dotIdx].Kind != parser.TokDot {
-			continue
-		}
-
-		funcIdx := tokNextSig(tokens, n, dotIdx+1)
-		if pastEnd(funcIdx) {
-			continue
-		}
-		if tokens[funcIdx].Kind != parser.TokIdent {
-			continue
-		}
-		funcName := parser.TokenText(source, tokens[funcIdx])
-
-		nextIdx := tokNextSig(tokens, n, funcIdx+1)
-		var arity int
-		var skipTo int
-
-		if nextIdx < n && tokens[nextIdx].Kind == parser.TokOpenParen {
-			arity = countCallArity(tokens, nextIdx)
-			closeIdx := findMatchingCloseParen(tokens, nextIdx)
-			if closeIdx >= 0 {
-				skipTo = closeIdx
-			} else {
-				skipTo = nextIdx
+		if m, f, a, s, ok := tryMatchModuleDotFuncCall(callIdx); ok {
+			moduleRef, funcName, arity, skipTo = m, f, a, s
+		} else if tokens[callIdx].Kind == parser.TokIdent {
+			// Could be a bare call (ident(args)) or a pipe start (ident |> ...)
+			fn := parser.TokenText(source, tokens[callIdx])
+			if strings.HasPrefix(fn, "_") || parser.IsElixirKeyword(fn) {
+				continue
 			}
-		} else if nextIdx < n && isCallArgStartToken(tokens[nextIdx].Kind) {
-			arity, skipTo = countNoParenCallArity(tokens, nextIdx)
+			a, s, ok := readCallArgs(tokens, n, callIdx)
+			if ok {
+				// Bare local call: user = build_user() or user <- get_user()
+				moduleRef = "__MODULE__"
+				funcName = fn
+				arity = a
+				skipTo = s
+			} else {
+				// Not a function call — check for pipe chain start: ident |> ...
+				pipeIdx := tokNextSig(tokens, n, callIdx+1)
+				if pastEnd(pipeIdx) || tokens[pipeIdx].Kind != parser.TokPipe {
+					continue
+				}
+				afterPipe := tokNextSig(tokens, n, pipeIdx+1)
+				if pastEnd(afterPipe) {
+					continue
+				}
+				if m, f, a, s, ok := tryMatchModuleDotFuncCall(afterPipe); ok {
+					moduleRef, funcName, arity, skipTo = m, f, a, s
+				} else if tokens[afterPipe].Kind == parser.TokIdent {
+					fn2 := parser.TokenText(source, tokens[afterPipe])
+					if strings.HasPrefix(fn2, "_") || parser.IsElixirKeyword(fn2) {
+						continue
+					}
+					a, s, ok := readCallArgs(tokens, n, afterPipe)
+					if !ok {
+						continue
+					}
+					moduleRef = "__MODULE__"
+					funcName = fn2
+					arity = a
+					skipTo = s
+				} else {
+					continue
+				}
+			}
 		} else {
 			continue
 		}
 
+		// Follow pipe chains: if the next significant token is |>, look for
+		// subsequent Module.func() calls and use the last one as the source.
+		// Bare function calls in the chain are skipped.
+		for {
+			pipeIdx := tokNextSig(tokens, n, skipTo+1)
+			if pastEnd(pipeIdx) {
+				break
+			}
+			if tokens[pipeIdx].Kind != parser.TokPipe {
+				break
+			}
+			afterPipe := tokNextSig(tokens, n, pipeIdx+1)
+			if pastEnd(afterPipe) {
+				break
+			}
+			if m, f, a, s, ok := tryMatchModuleDotFuncCall(afterPipe); ok {
+				// Found Module.func() in pipe chain — use it.
+				moduleRef, funcName, arity, skipTo = m, f, a, s
+			} else if s, ok := skipBareFuncCall(afterPipe); ok {
+				// Bare call in pipe chain — skip it, keep looking.
+				skipTo = s
+			} else {
+				break
+			}
+		}
+
 		call := VariableFunctionCall{
-			VarName:  varName,
 			Module:   moduleRef,
 			Function: funcName,
 			Arity:    arity,
 			Line:     tok.Line - 1,
 		}
 
-		if idx, ok := seen[varName]; ok {
-			(*results)[idx] = call
-		} else {
-			seen[varName] = len(*results)
-			*results = append(*results, call)
+		for _, varName := range varNames {
+			call.VarName = varName
+			if idx, ok := seen[varName]; ok {
+				(*results)[idx] = call
+			} else {
+				seen[varName] = len(*results)
+				*results = append(*results, call)
+			}
 		}
 
 		i = skipTo
@@ -947,6 +1153,85 @@ func isCallArgStartToken(k parser.TokenKind) bool {
 	default:
 		return false
 	}
+}
+
+// collectPatternVarNames collects variable names from the left side of = or <-.
+// patternStart is the last token of the pattern (scanning backward from eqIdx),
+// and eqIdx is the index of = or <-. Handles simple idents and destructured
+// tuple/list patterns like {:ok, var} or [a, b].
+func collectPatternVarNames(tokens []parser.Token, source []byte, patternStart, eqIdx int) []string {
+	if patternStart < 0 {
+		return nil
+	}
+
+	tok := tokens[patternStart]
+
+	// Simple variable: user = ...
+	if tok.Kind == parser.TokIdent {
+		name := parser.TokenText(source, tok)
+		if strings.HasPrefix(name, "_") || parser.IsElixirKeyword(name) {
+			return nil
+		}
+		return []string{name}
+	}
+
+	// Destructured pattern: find the matching opening bracket and collect
+	// idents inside (skipping keyword keys like name: in struct patterns).
+	var openKind parser.TokenKind
+	switch tok.Kind {
+	case parser.TokCloseBrace:
+		openKind = parser.TokOpenBrace
+	case parser.TokCloseBracket:
+		openKind = parser.TokOpenBracket
+	default:
+		return nil // parenthesised expr or unknown — skip
+	}
+
+	depth := 1
+	openIdx := -1
+	for j := patternStart - 1; j >= 0; j-- {
+		if tokens[j].Kind == tok.Kind {
+			depth++
+		} else if tokens[j].Kind == openKind {
+			depth--
+			if depth == 0 {
+				openIdx = j
+				break
+			}
+		}
+	}
+	if openIdx < 0 {
+		return nil
+	}
+
+	// Skip struct literals (%Module{...}) on the left side.
+	prevBeforeOpen := prevSignificantToken(tokens, openIdx)
+	if prevBeforeOpen >= 0 &&
+		(tokens[prevBeforeOpen].Kind == parser.TokPercent || tokens[prevBeforeOpen].Kind == parser.TokModule) {
+		return nil
+	}
+
+	// Collect idents inside the brackets, skipping keyword keys.
+	var names []string
+	for j := openIdx + 1; j < patternStart; j++ {
+		if tokens[j].Kind != parser.TokIdent {
+			continue
+		}
+		// Skip keyword keys (followed by : or =>).
+		next := tokNextSig(tokens, len(tokens), j+1)
+		if next < len(tokens) && next < patternStart {
+			if (tokens[next].Kind == parser.TokOther && parser.TokenText(source, tokens[next]) == ":") ||
+				(tokens[next].Kind == parser.TokOther && parser.TokenText(source, tokens[next]) == "=>") {
+				continue
+			}
+		}
+		name := parser.TokenText(source, tokens[j])
+		if strings.HasPrefix(name, "_") || parser.IsElixirKeyword(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // countNoParenCallArity counts arguments in a no-paren function call starting
@@ -1031,6 +1316,29 @@ func countCallArity(tokens []parser.Token, openParen int) int {
 
 func isWhitespaceToken(k parser.TokenKind) bool {
 	return k == parser.TokEOL || k == parser.TokComment
+}
+
+// readCallArgs reads the arguments of a function call starting at funcIdx
+// (the index of the function-name token). Handles both parenthesized and
+// no-paren calls. Returns arity, the index of the last token of the call
+// (close paren for paren calls, last arg token for no-paren), and ok.
+func readCallArgs(tokens []parser.Token, n int, funcIdx int) (arity, skipTo int, ok bool) {
+	nextIdx := tokNextSig(tokens, n, funcIdx+1)
+	if nextIdx < n && tokens[nextIdx].Kind == parser.TokOpenParen {
+		arity = countCallArity(tokens, nextIdx)
+		closeIdx := findMatchingCloseParen(tokens, nextIdx)
+		if closeIdx >= 0 {
+			skipTo = closeIdx
+		} else {
+			skipTo = nextIdx
+		}
+		return arity, skipTo, true
+	}
+	if nextIdx < n && isCallArgStartToken(tokens[nextIdx].Kind) {
+		a, s := countNoParenCallArity(tokens, nextIdx)
+		return a, s, true
+	}
+	return 0, funcIdx, false
 }
 
 // findMatchingCloseParen finds the matching ) for the ( at tokens[openIdx].

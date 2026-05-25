@@ -1238,6 +1238,23 @@ func (s *Server) resolveVariableTypeFromExCk(ctx context.Context, tf *TokenizedF
 		return ""
 	}
 
+	// Fast path: for bare local calls (Module == "__MODULE__"), check the
+	// @spec return type before querying the BEAM. This works even when the
+	// module hasn't been compiled yet.
+	if call.Module == "__MODULE__" {
+		if structRef := findSpecReturnType(tf.tokens, tf.source, call.Function, call.Arity); structRef != "" {
+			aliases := tf.ExtractAliasesInScope(call.Line)
+			s.mergeAliasesFromUseTokenized(tf, aliases)
+			resolvedModule := tf.ResolveModuleExpr(structRef, call.Line)
+			if fullModule := s.resolveModuleWithNesting(resolvedModule, aliases, filePath, call.Line); fullModule != "" {
+				if s.debug {
+					s.debugf("Spec return type struct: %s/%d -> %s", call.Function, call.Arity, fullModule)
+				}
+				return fullModule
+			}
+		}
+	}
+
 	// Resolve the module reference through aliases.
 	aliases := tf.ExtractAliasesInScope(call.Line)
 	s.mergeAliasesFromUseTokenized(tf, aliases)
@@ -1482,7 +1499,13 @@ func (s *Server) maybePrewarmStructFields(docURI, filePath, text string) {
 	if filePath == "" || !parser.IsElixirFile(filePath) || !s.isProjectFile(filePath) || s.isDepsFile(filePath) {
 		return
 	}
-	if !strings.Contains(text, "%") {
+	// Trigger prewarm for files that contain struct literals (%Module{}) or
+	// variable assignments to function calls (Module.func()). The cheap
+	// %-check catches the common struct-literal case; without it we still
+	// prewarm, but only if there's an = sign (assignment) that could be
+	// a variable-to-function-call pattern. This avoids prewarming files
+	// that are purely module definitions with no runnable code.
+	if !strings.Contains(text, "%") && !strings.Contains(text, "=") {
 		return
 	}
 
@@ -1515,7 +1538,7 @@ func (s *Server) prewarmStructFieldsFromText(_ string, filePath, text string) {
 	tf := NewTokenizedFile(text)
 
 	seen := make(map[string]bool)
-	warmed := 0
+	var warmed int
 
 	// Pre-warm from struct literal references (%Module{}).
 	refs := tf.StructModuleRefs()
@@ -1535,39 +1558,46 @@ func (s *Server) prewarmStructFieldsFromText(_ string, filePath, text string) {
 	// Pre-warm from function call return types via ExCk.
 	// Scan the entire file for var = Module.func(...) patterns.
 	calls := tf.AllVariableFunctionCalls()
-	for _, call := range calls {
-		aliases := tf.ExtractAliasesInScope(call.Line)
-		s.mergeAliasesFromUseTokenized(tf, aliases)
-		resolvedModule := tf.ResolveModuleExpr(call.Module, call.Line)
-		fullCallModule := s.resolveModuleWithNesting(resolvedModule, aliases, filePath, call.Line)
-		if fullCallModule == "" {
-			continue
-		}
-
+	if len(calls) > 0 {
 		buildRoot := s.structFieldBuildRoot(filePath)
-		if buildRoot == "" {
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		bp := s.getBeamProcess(ctx, buildRoot)
-		if bp == nil {
+		if buildRoot != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			bp := s.getBeamProcess(ctx, buildRoot)
+			if bp != nil && bp.Ready(ctx) == nil {
+				type excResult struct {
+					structModule string
+				}
+				results := make([]excResult, len(calls))
+				var wg sync.WaitGroup
+				for i, call := range calls {
+					aliases := tf.ExtractAliasesInScope(call.Line)
+					s.mergeAliasesFromUseTokenized(tf, aliases)
+					resolvedModule := tf.ResolveModuleExpr(call.Module, call.Line)
+					fullCallModule := s.resolveModuleWithNesting(resolvedModule, aliases, filePath, call.Line)
+					if fullCallModule == "" {
+						continue
+					}
+					wg.Add(1)
+					go func(idx int, mod, fn string, arity int) {
+						defer wg.Done()
+						structModule, err := bp.ReturnTypeStruct(ctx, mod, fn, arity)
+						if err == nil && structModule != "" {
+							results[idx] = excResult{structModule: structModule}
+						}
+					}(i, fullCallModule, call.Function, call.Arity)
+				}
+				wg.Wait()
+				for _, res := range results {
+					if res.structModule == "" || seen[res.structModule] {
+						continue
+					}
+					seen[res.structModule] = true
+					s.prewarmStructFields(filePath, res.structModule)
+					warmed++
+				}
+			}
 			cancel()
-			continue
 		}
-		if err := bp.Ready(ctx); err != nil {
-			cancel()
-			continue
-		}
-
-		structModule, err := bp.ReturnTypeStruct(ctx, fullCallModule, call.Function, call.Arity)
-		cancel()
-		if err != nil || structModule == "" || seen[structModule] {
-			continue
-		}
-		seen[structModule] = true
-		s.prewarmStructFields(filePath, structModule)
-		warmed++
 	}
 
 	if s.debug && warmed > 0 {
@@ -1843,6 +1873,10 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 				s.debugf("  fields=%d", len(fields))
 				s.debugf("  elapsed=%s", time.Since(tStruct).Round(time.Microsecond))
 			}
+			if fullModule != "" {
+				// Cache is warming — signal the client to re-query.
+				return &protocol.CompletionList{IsIncomplete: true}, nil
+			}
 			return nil, nil
 		}
 
@@ -1950,6 +1984,9 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 					}, nil
 				}
 			}
+			// Cache is warming — signal the client to re-query so the next
+			// keystroke hits the warm cache.
+			return &protocol.CompletionList{IsIncomplete: true}, nil
 		}
 	}
 

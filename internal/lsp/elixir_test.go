@@ -1090,6 +1090,27 @@ end`,
 			col:  len("  data"),
 			want: map[string]string{},
 		},
+		{
+			name: "struct update syntax binds variable",
+			code: `def run(%User{} = user) do
+  updated = %User{user | name: "new"}
+  updated
+end`,
+			line: 2,
+			col:  len("  updated"),
+			want: map[string]string{"user": "User", "updated": "User"},
+		},
+		{
+			name: "struct update in body",
+			code: `def run do
+  user = %User{name: "old"}
+  modified = %User{user | name: "new"}
+  modified
+end`,
+			line: 3,
+			col:  len("  modified"),
+			want: map[string]string{"user": "User", "modified": "User"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1194,14 +1215,16 @@ end`,
 			},
 		},
 		{
-			name: "bare function call ignored",
+			name: "bare function call stored as __MODULE__",
 			code: `def run do
   user = get_user(id)
   user
 end`,
 			line: 2,
 			col:  len("  user"),
-			want: nil,
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "__MODULE__", Function: "get_user", Arity: 1},
+			},
 		},
 		{
 			name: "after cursor excluded",
@@ -1239,16 +1262,6 @@ end`,
 			},
 		},
 		{
-			name: "pipeline not detected",
-			code: `def run do
-  result = id |> Accounts.get_user()
-  result
-end`,
-			line: 2,
-			col:  len("  result"),
-			want: nil,
-		},
-		{
 			name: "no-paren call single arg",
 			code: `def run do
   user = Repo.get! User
@@ -1284,6 +1297,138 @@ end`,
 			col:  len("  changeset"),
 			want: []VariableFunctionCall{
 				{VarName: "changeset", Module: "Ecto.Changeset", Function: "change", Arity: 1},
+			},
+		},
+		{
+			name: "<- match binds variable",
+			code: `def run do
+  user <- Accounts.get_user(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "get_user", Arity: 1},
+			},
+		},
+		{
+			name: "<- with bare function call",
+			code: `def run do
+  user <- get_user(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "__MODULE__", Function: "get_user", Arity: 1},
+			},
+		},
+		{
+			name: "pipe chain uses last module function",
+			code: `def run do
+  user = Accounts.get_user(id) |> Admin.promote(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+			},
+		},
+		{
+			name: "pipe chain skips bare calls in middle",
+			code: `def run do
+  user = Accounts.fetch(id) |> process() |> Admin.promote(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+			},
+		},
+		{
+			name: "pipe chain starts with bare call, ends with module",
+			code: `def run do
+  user = fetch() |> Admin.promote(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+			},
+		},
+		{
+			name: "bare value pipe chain detected",
+			code: `def run do
+  result = id |> Accounts.get_user(id)
+  result
+end`,
+			line: 2,
+			col:  len("  result"),
+			want: []VariableFunctionCall{
+				{VarName: "result", Module: "Accounts", Function: "get_user", Arity: 1},
+			},
+		},
+		{
+			name: "destructured tuple = binds all variables",
+			code: `def run do
+  {:ok, user} = Accounts.get_user(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "get_user", Arity: 1},
+			},
+		},
+		{
+			name: "destructured tuple <- in with block",
+			code: `def run do
+  with {:ok, user} <- Accounts.get_user(id) do
+    user
+  end
+end`,
+			line: 2,
+			col:  len("    user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "get_user", Arity: 1},
+			},
+		},
+		{
+			name: "destructured list binds all variables",
+			code: `def run do
+  [first, second] = Repo.all()
+  first
+end`,
+			line: 2,
+			col:  len("  first"),
+			want: []VariableFunctionCall{
+				{VarName: "first", Module: "Repo", Function: "all", Arity: 0},
+				{VarName: "second", Module: "Repo", Function: "all", Arity: 0},
+			},
+		},
+		{
+			name: "struct literal on left is not collected",
+			code: `def run do
+  %User{name: n} = Accounts.get_user(id)
+  n
+end`,
+			line: 2,
+			col:  len("  n"),
+			want: nil,
+		},
+		{
+			name: "qualified module call like Ecto.Multi.new",
+			code: `def run do
+  multi = Ecto.Multi.new()
+  multi
+end`,
+			line: 2,
+			col:  len("  multi"),
+			want: []VariableFunctionCall{
+				{VarName: "multi", Module: "Ecto.Multi", Function: "new", Arity: 0},
 			},
 		},
 	}
@@ -1382,6 +1527,89 @@ end`,
 				if g.Arity != want.Arity {
 					t.Errorf("[%d] Arity = %d, want %d", i, g.Arity, want.Arity)
 				}
+			}
+		})
+	}
+}
+
+func TestFindSpecReturnType(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		funcName string
+		arity    int
+		want     string
+	}{
+		{
+			name: "bare t() returns __MODULE__",
+			code: `@spec build_user(integer()) :: t()
+def build_user(id) do
+end`,
+			funcName: "build_user",
+			arity:    1,
+			want:     "__MODULE__",
+		},
+		{
+			name: "Module.t() returns module name",
+			code: `@spec get_user(integer()) :: User.t()
+def get_user(id) do
+end`,
+			funcName: "get_user",
+			arity:    1,
+			want:     "User",
+		},
+		{
+			name: "qualified Module.t()",
+			code: `@spec get_user(integer()) :: MyApp.Accounts.User.t()
+def get_user(id) do
+end`,
+			funcName: "get_user",
+			arity:    1,
+			want:     "MyApp.Accounts.User",
+		},
+		{
+			name: "non-struct type returns empty",
+			code: `@spec count() :: integer()
+def count do
+end`,
+			funcName: "count",
+			arity:    0,
+			want:     "",
+		},
+		{
+			name: "arity mismatch returns empty",
+			code: `@spec get_user(integer(), keyword()) :: User.t()
+def get_user(id, opts) do
+end`,
+			funcName: "get_user",
+			arity:    1,
+			want:     "",
+		},
+		{
+			name: "zero-arity spec without parens",
+			code: `@spec all :: User.t()
+def all do
+end`,
+			funcName: "all",
+			arity:    0,
+			want:     "User",
+		},
+		{
+			name: "no matching spec",
+			code: `def run do
+end`,
+			funcName: "run",
+			arity:    0,
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens, source, _ := tokenize(tt.code)
+			got := findSpecReturnType(tokens, source, tt.funcName, tt.arity)
+			if got != tt.want {
+				t.Errorf("findSpecReturnType(%q, %d) = %q, want %q", tt.funcName, tt.arity, got, tt.want)
 			}
 		})
 	}
