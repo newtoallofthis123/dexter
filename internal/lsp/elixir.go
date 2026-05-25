@@ -193,14 +193,11 @@ func VariableFieldAccessAtCursor(tokens []parser.Token, source []byte, lineStart
 
 	// Case 1: cursor right after dot — "variable.|"
 	if tok.Kind == parser.TokDot {
-		if idx < 1 {
+		prev := prevSignificantToken(tokens, idx)
+		if prev < 0 || tokens[prev].Kind != parser.TokIdent {
 			return VariableFieldAccess{}, false
 		}
-		prev := tokens[idx-1]
-		if prev.Kind != parser.TokIdent {
-			return VariableFieldAccess{}, false
-		}
-		varName := parser.TokenText(source, prev)
+		varName := parser.TokenText(source, tokens[prev])
 		if strings.HasPrefix(varName, "_") || parser.IsElixirKeyword(varName) {
 			return VariableFieldAccess{}, false
 		}
@@ -212,16 +209,16 @@ func VariableFieldAccessAtCursor(tokens []parser.Token, source []byte, lineStart
 	}
 
 	// Case 2: cursor on field prefix — "variable.fie|"
-	if tok.Kind == parser.TokIdent && idx >= 2 {
-		dotTok := tokens[idx-1]
-		if dotTok.Kind != parser.TokDot {
+	if tok.Kind == parser.TokIdent {
+		dotIdx := prevSignificantToken(tokens, idx)
+		if dotIdx < 0 || tokens[dotIdx].Kind != parser.TokDot {
 			return VariableFieldAccess{}, false
 		}
-		varTok := tokens[idx-2]
-		if varTok.Kind != parser.TokIdent {
+		varIdx := prevSignificantToken(tokens, dotIdx)
+		if varIdx < 0 || tokens[varIdx].Kind != parser.TokIdent {
 			return VariableFieldAccess{}, false
 		}
-		varName := parser.TokenText(source, varTok)
+		varName := parser.TokenText(source, tokens[varIdx])
 		if strings.HasPrefix(varName, "_") || parser.IsElixirKeyword(varName) {
 			return VariableFieldAccess{}, false
 		}
@@ -498,7 +495,7 @@ var knownNonStructTypes = map[string]bool{
 	"Port":      true,
 	"PID":       true,
 	"Exception": true,
-	"Macro": true,
+	"Macro":     true,
 }
 
 // parseSpecParamTypes looks backward from defIdx for a preceding @spec and
