@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -5913,4 +5914,150 @@ func TestReturnTypeStruct_Integration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLineCouldBeStructValueSpaceTrigger(t *testing.T) {
+	tests := []struct {
+		name    string
+		lines   []string
+		lineNum int
+		col     int
+		want    bool
+	}{
+		{
+			name:    "single line struct value",
+			lines:   []string{"  %User{name: "},
+			lineNum: 0,
+			col:     len("  %User{name: "),
+			want:    true,
+		},
+		{
+			name:    "multi-line struct value brace on previous line",
+			lines:   []string{"  %User{", "    name: "},
+			lineNum: 1,
+			col:     len("    name: "),
+			want:    true,
+		},
+		{
+			name:    "multi-line with blank line before value",
+			lines:   []string{"  %User{", "", "    name: "},
+			lineNum: 2,
+			col:     len("    name: "),
+			want:    true,
+		},
+		{
+			name:    "multi-line with __MODULE__",
+			lines:   []string{"  %__MODULE__{", "    name: "},
+			lineNum: 1,
+			col:     len("    name: "),
+			want:    true,
+		},
+		{
+			name:    "qualified module multi-line",
+			lines:   []string{"  %MyApp.Accounts.User{", "    name: "},
+			lineNum: 1,
+			col:     len("    name: "),
+			want:    true,
+		},
+		{
+			name:    "plain map not a struct",
+			lines:   []string{"  %{name: "},
+			lineNum: 0,
+			col:     len("  %{name: "),
+			want:    false,
+		},
+		{
+			name:    "not a value position (no colon)",
+			lines:   []string{"  x = "},
+			lineNum: 0,
+			col:     len("  x = "),
+			want:    false,
+		},
+		{
+			name:    "colon-colon type reference not a key",
+			lines:   []string{"  Module:: "},
+			lineNum: 0,
+			col:     len("  Module:: "),
+			want:    false,
+		},
+		{
+			name:    "non-space character after colon",
+			lines:   []string{"  %User{name:x "},
+			lineNum: 0,
+			col:     len("  %User{name:x "),
+			want:    false,
+		},
+		{
+			name:    "struct with comma-separated value on second line",
+			lines:   []string{"  %User{name: \"x\",", "    email: "},
+			lineNum: 1,
+			col:     len("    email: "),
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lineCouldBeStructValueSpaceTrigger(tt.lines, tt.lineNum, tt.col)
+			if got != tt.want {
+				t.Errorf("lineCouldBeStructValueSpaceTrigger(%q, %d, %d) = %v, want %v",
+					tt.lines, tt.lineNum, tt.col, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrewarmStructFieldsDeduplication(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	path := filepath.Join(server.projectRoot, "lib", "controller.ex")
+	docURI := string(uri.File(path))
+	text := "defmodule MyApp.Controller do\n  alias MyApp.Accounts.User\n  def run do\n    %User{}\n  end\nend"
+
+	// First call should start a prewarm.
+	server.maybePrewarmStructFields(docURI, path, text)
+
+	server.prewarmingFilesMu.Lock()
+	firstInFlight := server.prewarmingFiles[docURI]
+	server.prewarmingFilesMu.Unlock()
+	if !firstInFlight {
+		t.Fatal("expected first prewarm to be in flight")
+	}
+
+	// Second call with the same docURI while first is still running should be skipped.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		server.maybePrewarmStructFields(docURI, path, text)
+	}()
+	wg.Wait()
+
+	// Still only one entry (the first one).
+	server.prewarmingFilesMu.Lock()
+	stillInFlight := server.prewarmingFiles[docURI]
+	server.prewarmingFilesMu.Unlock()
+	if !stillInFlight {
+		t.Fatal("expected prewarm to still be in flight after duplicate skip")
+	}
+
+	// Clean up: let the prewarm finish.
+	server.prewarmingFilesMu.Lock()
+	delete(server.prewarmingFiles, docURI)
+	server.prewarmingFilesMu.Unlock()
+
+	// Now a fresh call should start a new prewarm.
+	server.maybePrewarmStructFields(docURI, path, text)
+	server.prewarmingFilesMu.Lock()
+	newInFlight := server.prewarmingFiles[docURI]
+	server.prewarmingFilesMu.Unlock()
+	if !newInFlight {
+		t.Fatal("expected fresh prewarm to start after previous finished")
+	}
+
+	// Clean up.
+	server.prewarmingFilesMu.Lock()
+	delete(server.prewarmingFiles, docURI)
+	server.prewarmingFilesMu.Unlock()
 }

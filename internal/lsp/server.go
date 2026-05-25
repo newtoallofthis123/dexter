@@ -101,6 +101,9 @@ type Server struct {
 	structFieldMu    sync.Mutex
 	structFieldGen   uint64
 
+	prewarmingFiles   map[string]bool // docURI → currently prewarming
+	prewarmingFilesMu sync.Mutex
+
 	usingCache   map[string]*usingCacheEntry // module name → parsed __using__ result
 	usingCacheMu sync.RWMutex
 
@@ -140,6 +143,7 @@ func NewServer(s *store.Store, projectRoot string) *Server {
 		erlangBuildRoots:   make(map[string]*erlangBuildRootState),
 		erlangRuntimeCache: make(map[string]*erlangRuntimeCache),
 		structFieldCache:   make(map[structFieldCacheKey]*structFieldCacheEntry),
+		prewarmingFiles:    make(map[string]bool),
 		usingCache:         make(map[string]*usingCacheEntry),
 		depsCache:          make(map[string]bool),
 	}
@@ -1473,9 +1477,26 @@ func (s *Server) maybePrewarmStructFields(docURI, filePath, text string) {
 		return
 	}
 
+	// Avoid piling up goroutines on rapid keystrokes: skip if a prewarm
+	// for this document is already in flight. The next change event after
+	// the current one finishes will trigger a fresh prewarm with the latest
+	// text.
+	s.prewarmingFilesMu.Lock()
+	if s.prewarmingFiles[docURI] {
+		s.prewarmingFilesMu.Unlock()
+		return
+	}
+	s.prewarmingFiles[docURI] = true
+	s.prewarmingFilesMu.Unlock()
+
 	s.backgroundWork.Add(1)
 	go func() {
 		defer s.backgroundWork.Done()
+		defer func() {
+			s.prewarmingFilesMu.Lock()
+			delete(s.prewarmingFiles, docURI)
+			s.prewarmingFilesMu.Unlock()
+		}()
 		s.prewarmStructFieldsFromText(docURI, filePath, text)
 	}()
 }
@@ -1783,7 +1804,7 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		return nil, nil
 	}
 
-	if isSpaceCompletionTrigger(params) && !lineCouldBeStructValueSpaceTrigger(lines[lineNum], col) {
+	if isSpaceCompletionTrigger(params) && !lineCouldBeStructValueSpaceTrigger(lines, lineNum, col) {
 		return nil, nil
 	}
 
@@ -2260,10 +2281,17 @@ func isSpaceCompletionTrigger(params *protocol.CompletionParams) bool {
 		params.Context.TriggerCharacter == " "
 }
 
-func lineCouldBeStructValueSpaceTrigger(line string, col int) bool {
-	if col <= 0 {
+// lineCouldBeStructValueSpaceTrigger is a cheap pre-filter that returns true
+// if the cursor looks like it's inside a struct value position (e.g. after
+// "name: " inside %User{...}). It checks the current line for the ": " pattern
+// and scans backwards through preceding lines for the "%Module{" opening.
+// False positives are acceptable — they just let the space trigger through to
+// the token-based StructValueContextAtCursor check.
+func lineCouldBeStructValueSpaceTrigger(lines []string, lineNum, col int) bool {
+	if lineNum < 0 || lineNum >= len(lines) || col <= 0 {
 		return false
 	}
+	line := lines[lineNum]
 	if col > len(line) {
 		col = len(line)
 	}
@@ -2282,21 +2310,34 @@ func lineCouldBeStructValueSpaceTrigger(line string, col int) bool {
 		}
 	}
 
-	braceIdx := strings.LastIndexByte(before[:colonIdx], '{')
+	// Build the full text from the start of the document up to the colon
+	// so we can find the %Module{ opening even when it spans multiple lines.
+	var buf strings.Builder
+	for l := 0; l < lineNum; l++ {
+		buf.WriteString(lines[l])
+		buf.WriteByte('\n')
+	}
+	buf.WriteString(line[:colonIdx])
+	fullBefore := buf.String()
+
+	braceIdx := strings.LastIndexByte(fullBefore, '{')
 	if braceIdx < 0 {
 		return false
 	}
 	i := braceIdx - 1
-	for i >= 0 && (before[i] == ' ' || before[i] == '\t') {
+	for i >= 0 && (fullBefore[i] == ' ' || fullBefore[i] == '\t' || fullBefore[i] == '\n') {
 		i--
 	}
-	if i < 0 || !isStructModuleRefByte(before[i]) {
+	if i < 0 || !isStructModuleRefByte(fullBefore[i]) {
 		return false
 	}
-	for i >= 0 && isStructModuleRefByte(before[i]) {
+	for i >= 0 && isStructModuleRefByte(fullBefore[i]) {
 		i--
 	}
-	return i >= 0 && before[i] == '%'
+	for i >= 0 && (fullBefore[i] == ' ' || fullBefore[i] == '\t' || fullBefore[i] == '\n') {
+		i--
+	}
+	return i >= 0 && fullBefore[i] == '%'
 }
 
 func isStructModuleRefByte(b byte) bool {
