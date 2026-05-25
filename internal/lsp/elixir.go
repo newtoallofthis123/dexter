@@ -410,7 +410,7 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 			// Look for = after the struct, then a variable
 			afterClose := tokNextSig(tokens, len(tokens), closeIdx+1)
 			if afterClose < len(tokens) && tokens[afterClose].Start < offset &&
-				tokens[afterClose].Kind == parser.TokOther && tokenText(source, tokens[afterClose]) == "=" {
+				tokens[afterClose].Kind == parser.TokOther && parser.TokenText(source, tokens[afterClose]) == "=" {
 				// Look for variable after =
 				varIdx := tokNextSig(tokens, len(tokens), afterClose+1)
 				if varIdx < len(tokens) && tokens[varIdx].Start < offset && tokens[varIdx].Kind == parser.TokIdent {
@@ -443,7 +443,7 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 			if eqIdx >= len(tokens) || tokens[eqIdx].Start >= offset {
 				continue
 			}
-			isEquals := tokens[eqIdx].Kind == parser.TokOther && tokenText(source, tokens[eqIdx]) == "="
+			isEquals := tokens[eqIdx].Kind == parser.TokOther && parser.TokenText(source, tokens[eqIdx]) == "="
 			isDefault := tokens[eqIdx].Kind == parser.TokBackslash
 			if !isEquals && !isDefault {
 				continue
@@ -498,8 +498,7 @@ var knownNonStructTypes = map[string]bool{
 	"Port":      true,
 	"PID":       true,
 	"Exception": true,
-	"Macro":     true,
-	"Macro.Env": true,
+	"Macro": true,
 }
 
 // parseSpecParamTypes looks backward from defIdx for a preceding @spec and
@@ -711,7 +710,7 @@ func extractParamName(tokens []parser.Token, source []byte, start, end int) stri
 		case parser.TokCloseParen, parser.TokCloseBracket, parser.TokCloseBrace:
 			depth--
 		case parser.TokOther:
-			if depth == 0 && tokenText(source, tok) == "=" {
+			if depth == 0 && parser.TokenText(source, tok) == "=" {
 				sawEquals = true
 			}
 		case parser.TokBackslash:
@@ -870,7 +869,7 @@ func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, e
 		if pastEnd(eqIdx) {
 			continue
 		}
-		if tokens[eqIdx].Kind != parser.TokOther || tokenText(source, tokens[eqIdx]) != "=" {
+		if tokens[eqIdx].Kind != parser.TokOther || parser.TokenText(source, tokens[eqIdx]) != "=" {
 			continue
 		}
 
@@ -1074,11 +1073,6 @@ func findMatchingCloseBrace(tokens []parser.Token, openIdx int) int {
 		}
 	}
 	return -1
-}
-
-// tokenText returns the source text for a token as a string.
-func tokenText(source []byte, tok parser.Token) string {
-	return string(source[tok.Start:tok.End])
 }
 
 func VariableNamesBeforeCursor(tokens []parser.Token, source []byte, lineStarts []int, line, col int) []string {
