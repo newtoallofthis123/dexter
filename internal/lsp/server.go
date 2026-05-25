@@ -348,6 +348,9 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 		if v, ok := opts["debug"].(bool); ok {
 			s.debug = v
 		}
+		if v, ok := opts["maxTransientDocuments"].(float64); ok {
+			s.docs.SetMaxTransient(int(v))
+		}
 	}
 	if os.Getenv("DEXTER_DEBUG") == "true" {
 		s.debug = true
@@ -594,7 +597,7 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		defer func() { s.debugf("Definition: total %s", time.Since(t0).Round(time.Microsecond)) }()
 	}
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -658,7 +661,8 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 
 		// Variable go-to-definition via tree-sitter.
 		// The first occurrence in scope is the definition (pattern/assignment).
-		if tree, src, ok := s.docs.GetTree(docURI); ok {
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
 			if occs := treesitter.FindVariableOccurrencesWithTree(tree.RootNode(), src, uint(lineNum), uint(col)); len(occs) > 0 {
 				s.debugf("Definition: returning variable definition at line %d", occs[0].Line)
 				return []protocol.Location{{
@@ -1624,7 +1628,7 @@ func (s *Server) LogTrace(ctx context.Context, params *protocol.LogTraceParams) 
 func (s *Server) SetTrace(ctx context.Context, params *protocol.SetTraceParams) error { return nil }
 func (s *Server) CodeAction(ctx context.Context, params *protocol.CodeActionParams) ([]protocol.CodeAction, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -1796,7 +1800,7 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 	docURI := string(params.TextDocument.URI)
 	filePath := uriToPath(params.TextDocument.URI)
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -2194,7 +2198,8 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		}
 
 		// Variables are usually the intended target in bare value positions.
-		if tree, src, ok := s.docs.GetTree(docURI); ok {
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
 			for _, varName := range treesitter.FindVariablesInScopeWithTree(tree.RootNode(), src, uint(lineNum), uint(col)) {
 				addVariableCompletion(varName)
 			}
@@ -2254,6 +2259,22 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 			s.addCompletionsFromUsing(resolveModule(usedModule, aliases), funcPrefix, seen, &items, visitedCompletion, inPipe, s.snippetSupport)
 		}
 
+		// Variables in scope via tree-sitter
+		var varsInScope []string
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
+			varsInScope = treesitter.FindVariablesInScopeWithTree(tree.RootNode(), src, uint(lineNum), uint(col))
+		}
+		for _, varName := range varsInScope {
+			if strings.HasPrefix(varName, funcPrefix) && !seen[varName] {
+				seen[varName] = true
+				items = append(items, protocol.CompletionItem{
+					Label:  varName,
+					Kind:   protocol.CompletionItemKindVariable,
+					Detail: "variable",
+				})
+			}
+		}
 		if s.snippetSupport {
 			for name, snippet := range elixirFormSnippets {
 				if strings.HasPrefix(name, funcPrefix) && !seen[name] {
@@ -3037,7 +3058,7 @@ func (s *Server) Declaration(ctx context.Context, params *protocol.DeclarationPa
 		defer func() { s.debugf("Declaration: total %s", time.Since(t0).Round(time.Microsecond)) }()
 	}
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		s.debugf("Declaration: document not open")
 		return nil, nil
@@ -3263,7 +3284,7 @@ func (s *Server) DocumentColor(ctx context.Context, params *protocol.DocumentCol
 }
 func (s *Server) DocumentHighlight(ctx context.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -3271,10 +3292,11 @@ func (s *Server) DocumentHighlight(ctx context.Context, params *protocol.Documen
 	lineNum := int(params.Position.Line)
 	col := int(params.Position.Character)
 
-	tree, src, hasTree := s.docs.GetTree(docURI)
+	tree, src, release, hasTree := s.docs.GetTree(docURI)
 	if !hasTree {
 		return nil, nil
 	}
+	defer release()
 	root := tree.RootNode()
 
 	// Try scope-aware variable highlight first
@@ -3335,7 +3357,7 @@ func (s *Server) DocumentLinkResolve(ctx context.Context, params *protocol.Docum
 }
 func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSymbolParams) ([]interface{}, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -3841,7 +3863,7 @@ func (s *Server) ExecuteCommand(ctx context.Context, params *protocol.ExecuteCom
 }
 func (s *Server) FoldingRanges(ctx context.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -3985,7 +4007,7 @@ func (s *Server) Formatting(ctx context.Context, params *protocol.DocumentFormat
 func (s *Server) Hover(ctx context.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
 	docURI := string(params.TextDocument.URI)
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -4100,7 +4122,7 @@ func (s *Server) Implementation(ctx context.Context, params *protocol.Implementa
 		defer func() { s.debugf("Implementation: total %s", time.Since(t0).Round(time.Microsecond)) }()
 	}
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -4167,7 +4189,7 @@ func (s *Server) OnTypeFormatting(ctx context.Context, params *protocol.Document
 }
 func (s *Server) PrepareRename(ctx context.Context, params *protocol.PrepareRenameParams) (*protocol.Range, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -4190,7 +4212,8 @@ func (s *Server) PrepareRename(ctx context.Context, params *protocol.PrepareRena
 	// For bare identifiers (no module qualifier), check tree-sitter variables
 	// first — a local variable shadows a same-named function in Elixir.
 	if moduleRef == "" {
-		if tree, src, ok := s.docs.GetTree(docURI); ok {
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
 			if occs := treesitter.FindVariableOccurrencesWithTree(tree.RootNode(), src, uint(lineNum), uint(col)); len(occs) > 0 {
 				for _, occ := range occs {
 					if occ.Line == uint(lineNum) && uint(col) >= occ.StartCol && uint(col) < occ.EndCol {
@@ -4310,7 +4333,7 @@ func (s *Server) References(ctx context.Context, params *protocol.ReferenceParam
 		defer func() { s.debugf("References: total %s", time.Since(t).Round(time.Microsecond)) }()
 	}
 
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		s.debugf("References: document not found in store")
 		return nil, nil
@@ -4387,7 +4410,8 @@ func (s *Server) References(ctx context.Context, params *protocol.ReferenceParam
 		// function with the same name, so variable references take priority.
 		// Bare identifiers that aren't defined as variables fall through to
 		// function reference lookup.
-		if tree, src, ok := s.docs.GetTree(docURI); ok {
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
 			if occs := treesitter.FindVariableOccurrencesWithTree(tree.RootNode(), src, uint(lineNum), uint(col)); len(occs) > 0 {
 				var locations []protocol.Location
 				for _, occ := range occs {
@@ -4570,7 +4594,7 @@ func (s *Server) References(ctx context.Context, params *protocol.ReferenceParam
 
 func (s *Server) Rename(ctx context.Context, params *protocol.RenameParams) (*protocol.WorkspaceEdit, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -4592,7 +4616,8 @@ func (s *Server) Rename(ctx context.Context, params *protocol.RenameParams) (*pr
 	// For bare identifiers, check tree-sitter variables first — a local
 	// variable shadows a same-named function in Elixir.
 	if moduleRef == "" {
-		if tree, src, ok := s.docs.GetTree(docURI); ok {
+		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
+			defer release()
 			if occs := treesitter.FindVariableOccurrencesWithTree(tree.RootNode(), src, uint(lineNum), uint(col)); len(occs) > 0 {
 				if treesitter.NameExistsInScopeOf(tree.RootNode(), src, uint(lineNum), uint(col), params.NewName) {
 					return nil, fmt.Errorf("variable %q already exists in this scope", params.NewName)
@@ -5561,10 +5586,12 @@ func isDepsFileUncached(filePath string) bool {
 }
 
 // readFileText returns the contents of filePath, preferring the in-memory
-// document store for open buffers. The second return indicates whether the
-// file is currently open in the editor.
+// document store for editor-owned (didOpen) buffers. The second return
+// indicates whether the file is currently open in the editor — transient
+// entries loaded from disk via GetOrLoad are NOT reported as open.
 func (s *Server) readFileText(filePath string) (text string, open bool, ok bool) {
-	if t, found := s.docs.Get(string(uri.File(filePath))); found {
+	uri := string(uri.File(filePath))
+	if t, found := s.docs.GetIfOpen(uri); found {
 		return t, true, true
 	}
 	if data, err := os.ReadFile(filePath); err == nil {
@@ -5574,11 +5601,14 @@ func (s *Server) readFileText(filePath string) (text string, open bool, ok bool)
 }
 
 // getFileLine returns the text of line lineNum (1-based) from the file at
-// filePath, preferring the in-memory document store for open buffers.
-// For closed files, only reads up to the target line instead of the whole file.
+// filePath, preferring the in-memory document store for editor-owned
+// buffers. Transient entries loaded via GetOrLoad fall through to the
+// disk path. For closed files, only reads up to the target line instead
+// of the whole file.
 func (s *Server) getFileLine(filePath string, lineNum int) (string, bool) {
-	// Open buffer: extract the single line without splitting the entire text
-	if text, ok := s.docs.Get(string(uri.File(filePath))); ok {
+	// Editor-owned buffer: extract the single line from memory
+	uri := string(uri.File(filePath))
+	if text, ok := s.docs.GetIfOpen(uri); ok {
 		line, found := nthLine(text, lineNum-1)
 		if found {
 			return line, true
@@ -5631,7 +5661,7 @@ func (s *Server) findBareCallRefs(module, functionName string) []store.Reference
 }
 func (s *Server) SignatureHelp(ctx context.Context, params *protocol.SignatureHelpParams) (*protocol.SignatureHelp, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -5798,7 +5828,7 @@ func (s *Server) Symbols(ctx context.Context, params *protocol.WorkspaceSymbolPa
 }
 func (s *Server) TypeDefinition(ctx context.Context, params *protocol.TypeDefinitionParams) ([]protocol.Location, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
@@ -5871,7 +5901,7 @@ func (s *Server) DidDeleteFiles(ctx context.Context, params *protocol.DeleteFile
 func (s *Server) CodeLensRefresh(ctx context.Context) error { return nil }
 func (s *Server) PrepareCallHierarchy(ctx context.Context, params *protocol.CallHierarchyPrepareParams) ([]protocol.CallHierarchyItem, error) {
 	docURI := string(params.TextDocument.URI)
-	text, ok := s.docs.Get(docURI)
+	text, ok := s.docs.GetOrLoad(docURI)
 	if !ok {
 		return nil, nil
 	}
