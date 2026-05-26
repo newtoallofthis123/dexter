@@ -502,6 +502,8 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 }
 
 // knownNonStructTypes lists modules whose .t() type does not represent a struct.
+// Modules like URI, Regex, Date, Time, DateTime, etc. are structs and should
+// NOT be listed here — they need struct field completion just like any other struct.
 var knownNonStructTypes = map[string]bool{
 	"String":            true,
 	"Integer":           true,
@@ -513,16 +515,6 @@ var knownNonStructTypes = map[string]bool{
 	"PID":               true,
 	"Exception":         true,
 	"Macro":             true,
-	"URI":               true,
-	"Regex":             true,
-	"Range":             true,
-	"MapSet":            true,
-	"Date":              true,
-	"Time":              true,
-	"NaiveDateTime":     true,
-	"DateTime":          true,
-	"File.Stat":         true,
-	"IO.Stream":         true,
 	"Keyword":           true,
 	"Map":               true,
 	"Tuple":             true,
@@ -530,7 +522,6 @@ var knownNonStructTypes = map[string]bool{
 	"Function":          true,
 	"GenServer":         true,
 	"Agent":             true,
-	"Task":              true,
 	"Supervisor":        true,
 	"Registry":          true,
 	"DynamicSupervisor": true,
@@ -1071,7 +1062,7 @@ func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, e
 					continue
 				}
 				if m, f, a, s, ok := tryMatchModuleDotFuncCall(afterPipe); ok {
-					moduleRef, funcName, arity, skipTo = m, f, a, s
+					moduleRef, funcName, arity, skipTo = m, f, a+1, s
 				} else if tokens[afterPipe].Kind == parser.TokIdent {
 					fn2 := parser.TokenText(source, tokens[afterPipe])
 					if strings.HasPrefix(fn2, "_") || parser.IsElixirKeyword(fn2) {
@@ -1083,7 +1074,7 @@ func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, e
 					}
 					moduleRef = "__MODULE__"
 					funcName = fn2
-					arity = a
+					arity = a + 1
 					skipTo = s
 				} else {
 					continue
@@ -1110,7 +1101,8 @@ func scanVariableFunctionCalls(tokens []parser.Token, source []byte, startIdx, e
 			}
 			if m, f, a, s, ok := tryMatchModuleDotFuncCall(afterPipe); ok {
 				// Found Module.func() in pipe chain — use it.
-				moduleRef, funcName, arity, skipTo = m, f, a, s
+				// +1 for the implicit piped first argument.
+				moduleRef, funcName, arity, skipTo = m, f, a+1, s
 			} else if s, ok := skipBareFuncCall(afterPipe); ok {
 				// Bare call in pipe chain — skip it, keep looking.
 				skipTo = s

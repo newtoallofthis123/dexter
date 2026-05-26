@@ -73,9 +73,10 @@ type structFieldCacheKey struct {
 }
 
 type structFieldCacheEntry struct {
-	fields  []string
-	loaded  bool
-	loading bool
+	fields     []string
+	loaded     bool
+	loading    bool
+	generation uint64 // the structFieldGen value when this entry was created/activated
 }
 
 type Server struct {
@@ -1321,17 +1322,27 @@ func (s *Server) cachedStructFieldsOrWarmWithLogging(filePath, module string, lo
 			return fields, true
 		}
 		if entry.loading {
-			s.structFieldMu.Unlock()
-			if s.debug && logCacheState {
-				s.debugf("StructFields cache warming")
-				s.debugf("  module=%s", key.module)
+			if entry.generation == generation {
+				// A goroutine with the current generation is already warming this entry.
+				s.structFieldMu.Unlock()
+				if s.debug && logCacheState {
+					s.debugf("StructFields cache warming")
+					s.debugf("  module=%s", key.module)
+				}
+				return nil, false
 			}
-			return nil, false
+			// Stale loading: a goroutine started with an older generation but
+			// the cache was invalidated before it finished. Fall through to start
+			// a fresh warm with the current generation.
 		}
 		entry.loading = true
+		entry.generation = s.structFieldGen
 		generation = s.structFieldGen
 	} else {
-		s.structFieldCache[key] = &structFieldCacheEntry{loading: true}
+		s.structFieldCache[key] = &structFieldCacheEntry{
+			loading:    true,
+			generation: s.structFieldGen,
+		}
 	}
 	s.structFieldMu.Unlock()
 
@@ -1393,25 +1404,29 @@ func (s *Server) warmStructFields(key structFieldCacheKey, generation uint64) {
 
 	tCache := s.debugNow()
 	s.structFieldMu.Lock()
-	if generation != s.structFieldGen {
-		// Cache was invalidated during lookup (likely a different module).
-		// Reset loading so future requests can retry this key.
-		if entry := s.structFieldCache[key]; entry != nil {
-			entry.loading = false
-		}
+	entry := s.structFieldCache[key]
+	if entry == nil {
+		// Entry was deleted while we were warming — invalidated by another change.
 		s.structFieldMu.Unlock()
 		if s.debug {
 			s.debugf("StructFields lookup discarded")
 			s.debugf("  module=%s", key.module)
-			s.debugf("  reason=cache invalidated during lookup")
+			s.debugf("  reason=entry deleted during lookup")
 			s.debugf("  total=%s", time.Since(tWarm).Round(time.Microsecond))
 		}
 		return
 	}
-	entry := s.structFieldCache[key]
-	if entry == nil {
-		entry = &structFieldCacheEntry{}
-		s.structFieldCache[key] = entry
+	if entry.generation != generation {
+		// Entry was recreated by a newer goroutine — our result is stale.
+		// Don't interfere with the newer goroutine's entry.
+		s.structFieldMu.Unlock()
+		if s.debug {
+			s.debugf("StructFields lookup discarded")
+			s.debugf("  module=%s", key.module)
+			s.debugf("  reason=generation mismatch (entry=%d, goroutine=%d)", entry.generation, generation)
+			s.debugf("  total=%s", time.Since(tWarm).Round(time.Microsecond))
+		}
+		return
 	}
 	entry.fields = fields
 	entry.loaded = true

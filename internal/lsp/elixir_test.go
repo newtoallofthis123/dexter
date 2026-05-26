@@ -1332,7 +1332,7 @@ end`,
 			line: 2,
 			col:  len("  user"),
 			want: []VariableFunctionCall{
-				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 2},
 			},
 		},
 		{
@@ -1344,7 +1344,7 @@ end`,
 			line: 2,
 			col:  len("  user"),
 			want: []VariableFunctionCall{
-				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 2},
 			},
 		},
 		{
@@ -1356,7 +1356,7 @@ end`,
 			line: 2,
 			col:  len("  user"),
 			want: []VariableFunctionCall{
-				{VarName: "user", Module: "Admin", Function: "promote", Arity: 1},
+				{VarName: "user", Module: "Admin", Function: "promote", Arity: 2},
 			},
 		},
 		{
@@ -1368,7 +1368,7 @@ end`,
 			line: 2,
 			col:  len("  result"),
 			want: []VariableFunctionCall{
-				{VarName: "result", Module: "Accounts", Function: "get_user", Arity: 1},
+				{VarName: "result", Module: "Accounts", Function: "get_user", Arity: 2},
 			},
 		},
 		{
