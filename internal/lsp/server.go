@@ -1873,7 +1873,7 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 				s.debugf("  fields=%d", len(fields))
 				s.debugf("  elapsed=%s", time.Since(tStruct).Round(time.Microsecond))
 			}
-			if fullModule != "" {
+			if fullModule != "" && !ready {
 				// Cache is warming — signal the client to re-query.
 				return &protocol.CompletionList{IsIncomplete: true}, nil
 			}
@@ -1986,7 +1986,9 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 			}
 			// Cache is warming — signal the client to re-query so the next
 			// keystroke hits the warm cache.
-			return &protocol.CompletionList{IsIncomplete: true}, nil
+			if !ready {
+				return &protocol.CompletionList{IsIncomplete: true}, nil
+			}
 		}
 	}
 
