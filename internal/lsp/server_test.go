@@ -945,6 +945,97 @@ end`)
 	}
 }
 
+func TestResolveCrossModuleSpecReturnStruct(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Target module with @spec returning {:ok, User.t()} | {:error, ...}.
+	// BEAM type inference can't see through Repo wrappers like this; the
+	// source @spec is the only signal.
+	indexFile(t, server.store, server.projectRoot, "lib/accounts.ex", `defmodule MyApp.Accounts do
+  alias MyApp.Accounts.User
+
+  @spec fetch_user_by_slug(String.t(), keyword()) :: {:ok, User.t()} | {:error, {:not_found, String.t()}}
+  def fetch_user_by_slug(slug, preloads \\ []) do
+    {:ok, %User{}}
+  end
+end
+`)
+
+	// User module so the alias resolves to a real indexed module.
+	indexFile(t, server.store, server.projectRoot, "lib/accounts/user.ex", `defmodule MyApp.Accounts.User do
+  defstruct [:id, :name, :email]
+end
+`)
+
+	tests := []struct {
+		name     string
+		function string
+		arity    int
+		want     string
+	}{
+		{"exact arity 2", "fetch_user_by_slug", 2, "MyApp.Accounts.User"},
+		// Default arg: caller passes 1 arg but @spec is written for arity 2.
+		{"arity 1 with default-arg fallback", "fetch_user_by_slug", 1, "MyApp.Accounts.User"},
+		{"unknown function", "nope", 1, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := server.resolveCrossModuleSpecReturnStruct("MyApp.Accounts", tt.function, tt.arity)
+			if got != tt.want {
+				t.Errorf("resolveCrossModuleSpecReturnStruct(MyApp.Accounts, %s, %d) = %q, want %q",
+					tt.function, tt.arity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveCrossModuleSpecReturnStruct_ScopedToTargetModule(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Two modules in the same file with the same function name but different
+	// return-type specs. Resolver should pick the spec inside the target
+	// module, not just the first match in the file.
+	indexFile(t, server.store, server.projectRoot, "lib/multi.ex", `defmodule MyApp.Other do
+  alias MyApp.Other.Token
+
+  @spec build(integer()) :: {:ok, Token.t()}
+  def build(id) do
+    {:ok, %Token{}}
+  end
+end
+
+defmodule MyApp.Accounts do
+  alias MyApp.Accounts.User
+
+  @spec build(integer()) :: {:ok, User.t()}
+  def build(id) do
+    {:ok, %User{}}
+  end
+end
+`)
+	indexFile(t, server.store, server.projectRoot, "lib/accounts/user.ex", `defmodule MyApp.Accounts.User do
+  defstruct [:id]
+end
+`)
+	indexFile(t, server.store, server.projectRoot, "lib/other/token.ex", `defmodule MyApp.Other.Token do
+  defstruct [:id]
+end
+`)
+
+	got := server.resolveCrossModuleSpecReturnStruct("MyApp.Accounts", "build", 1)
+	if got != "MyApp.Accounts.User" {
+		t.Errorf("resolveCrossModuleSpecReturnStruct(MyApp.Accounts, build, 1) = %q, want MyApp.Accounts.User", got)
+	}
+
+	got = server.resolveCrossModuleSpecReturnStruct("MyApp.Other", "build", 1)
+	if got != "MyApp.Other.Token" {
+		t.Errorf("resolveCrossModuleSpecReturnStruct(MyApp.Other, build, 1) = %q, want MyApp.Other.Token", got)
+	}
+}
+
 func TestCompletion_VariableDotFromEctoMulti(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()

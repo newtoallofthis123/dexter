@@ -1431,6 +1431,34 @@ end`,
 				{VarName: "multi", Module: "Ecto.Multi", Function: "new", Arity: 0},
 			},
 		},
+		{
+			// Module-body assignments (compile-time bindings, ad-hoc test
+			// snippets dropped at the top of a module). The scan should fall
+			// back to the enclosing defmodule body when there's no def above
+			// the cursor.
+			name: "module-body assignment outside any def",
+			code: `defmodule MyApp.Foo do
+  {:ok, user} = Accounts.fetch_user(id)
+  user
+end`,
+			line: 2,
+			col:  len("  user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "fetch_user", Arity: 1},
+			},
+		},
+		{
+			// No enclosing def *or* defmodule — bare top-level script. The
+			// scan should still find the assignment.
+			name: "top-level script assignment",
+			code: `{:ok, user} = Accounts.fetch_user(id)
+user`,
+			line: 1,
+			col:  len("user"),
+			want: []VariableFunctionCall{
+				{VarName: "user", Module: "Accounts", Function: "fetch_user", Arity: 1},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1599,6 +1627,60 @@ end`,
 			code: `def run do
 end`,
 			funcName: "run",
+			arity:    0,
+			want:     "",
+		},
+		{
+			name: "ok-tuple with Module.t() inside union",
+			code: `@spec fetch_user(integer()) :: {:ok, User.t()} | {:error, term()}
+def fetch_user(id) do
+end`,
+			funcName: "fetch_user",
+			arity:    1,
+			want:     "User",
+		},
+		{
+			name: "ok-tuple with qualified Module.t() inside union",
+			code: `@spec fetch_user(integer()) :: {:ok, MyApp.Accounts.User.t()} | {:error, atom()}
+def fetch_user(id) do
+end`,
+			funcName: "fetch_user",
+			arity:    1,
+			want:     "MyApp.Accounts.User",
+		},
+		{
+			name: "bare ok-tuple with t()",
+			code: `@spec build :: {:ok, t()}
+def build do
+end`,
+			funcName: "build",
+			arity:    0,
+			want:     "__MODULE__",
+		},
+		{
+			name: "Module.t() in union with nil",
+			code: `@spec maybe_get(integer()) :: User.t() | nil
+def maybe_get(id) do
+end`,
+			funcName: "maybe_get",
+			arity:    1,
+			want:     "User",
+		},
+		{
+			name: "ambiguous union of two struct branches",
+			code: `@spec pick() :: User.t() | Account.t()
+def pick do
+end`,
+			funcName: "pick",
+			arity:    0,
+			want:     "",
+		},
+		{
+			name: "ok-tuple with non-struct inner type",
+			code: `@spec fetch_id() :: {:ok, integer()} | {:error, term()}
+def fetch_id do
+end`,
+			funcName: "fetch_id",
 			arity:    0,
 			want:     "",
 		},

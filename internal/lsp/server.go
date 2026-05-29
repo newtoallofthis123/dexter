@@ -1279,15 +1279,79 @@ func (s *Server) resolveVariableTypeFromExCk(ctx context.Context, tf *TokenizedF
 	}
 
 	structModule, err := bp.ReturnTypeStruct(ctx, fullCallModule, call.Function, call.Arity)
-	if err != nil || structModule == "" {
+	if err == nil && structModule != "" {
+		if s.debug {
+			s.debugf("ExCk return type struct: %s.%s/%d -> %s", fullCallModule, call.Function, call.Arity, structModule)
+		}
+		return structModule
+	}
+
+	// BEAM inference gave up (typically because Elixir's compile-time type
+	// inferencer collapses to :term through Repo/normalize/with wrappers).
+	// Fall back to parsing the source @spec of the target function.
+	if specModule := s.resolveCrossModuleSpecReturnStruct(fullCallModule, call.Function, call.Arity); specModule != "" {
+		if s.debug {
+			s.debugf("Cross-module @spec struct: %s.%s/%d -> %s", fullCallModule, call.Function, call.Arity, specModule)
+		}
+		return specModule
+	}
+
+	return ""
+}
+
+// resolveCrossModuleSpecReturnStruct reads the source file of callModule and
+// looks for a @spec for `function` whose return type contains a struct (either
+// directly as Module.t() or wrapped in {:ok, ...}). Used as a fallback when
+// BEAM ExCk inference returns nothing because Elixir's compile-time inferencer
+// couldn't deduce a richer return type.
+func (s *Server) resolveCrossModuleSpecReturnStruct(callModule, function string, arity int) string {
+	modResults, err := s.store.LookupModule(callModule)
+	if err != nil || len(modResults) == 0 {
+		return ""
+	}
+	modDef := modResults[0]
+	text, _, ok := s.readFileText(modDef.FilePath)
+	if !ok {
+		return ""
+	}
+	tf := NewTokenizedFile(text)
+
+	// Scope to the target module: start from the module's opening line so we
+	// don't pick up a same-named function's @spec from an earlier module in
+	// the file. modDef.Line is 1-based; convert to a byte offset.
+	startOffset := 0
+	if startLine := modDef.Line - 1; startLine >= 0 && startLine < len(tf.lineStarts) {
+		startOffset = tf.lineStarts[startLine]
+	}
+
+	// Try the exact call arity first; if absent, try arity+1 to handle
+	// default-argument functions (def f(a, b \\ []) generates f/1 and f/2
+	// but only one @spec, usually for the higher arity).
+	structRef, specOffset := findSpecReturnTypeAfter(tf.tokens, tf.source, function, arity, startOffset)
+	if structRef == "" {
+		structRef, specOffset = findSpecReturnTypeAfter(tf.tokens, tf.source, function, arity+1, startOffset)
+	}
+	if structRef == "" {
 		return ""
 	}
 
-	if s.debug {
-		s.debugf("ExCk return type struct: %s.%s/%d -> %s", fullCallModule, call.Function, call.Arity, structModule)
+	// Resolve the struct reference using the target file's aliases at the
+	// @spec's line. "__MODULE__" inside a cross-module spec means the
+	// callee's module itself.
+	specLine := 0
+	for ln := len(tf.lineStarts) - 1; ln >= 0; ln-- {
+		if tf.lineStarts[ln] <= specOffset {
+			specLine = ln
+			break
+		}
 	}
-
-	return structModule
+	if structRef == "__MODULE__" {
+		return callModule
+	}
+	aliases := tf.ExtractAliasesInScope(specLine)
+	s.mergeAliasesFromUseTokenized(tf, aliases)
+	resolved := tf.ResolveModuleExpr(structRef, specLine)
+	return s.resolveModuleWithNesting(resolved, aliases, modDef.FilePath, specLine)
 }
 
 func (s *Server) cachedStructFieldsOrWarm(filePath, module string) ([]string, bool) {

@@ -334,8 +334,13 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 		return nil
 	}
 
-	// Find the enclosing function definition.
+	// Find the nearest enclosing def. @spec parameter inference is only
+	// meaningful inside a function head, so it's gated on this. Pattern
+	// scanning below also uses defIdx if present (tighter scope) but falls
+	// back to the enclosing module / file when the cursor sits at module
+	// body level (e.g. compile-time assignments, ad-hoc snippets).
 	defIdx := -1
+	moduleIdx := -1
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
 		if tok.Kind == parser.TokEOF || tok.Start >= offset {
@@ -344,31 +349,41 @@ func VariableStructTypes(tokens []parser.Token, source []byte, lineStarts []int,
 		if isFunctionDefinitionToken(tok.Kind) {
 			defIdx = i
 		}
-	}
-	if defIdx < 0 {
-		return nil
+		if tok.Kind == parser.TokDefmodule {
+			moduleIdx = i
+		}
 	}
 
 	result := make(map[string]string)
 
-	// Typespec inference: look backward from the def for a preceding @spec.
-	// Parse parameter types and match positionally to function param names.
-	specTypes := parseSpecParamTypes(tokens, source, defIdx)
-	paramNames := parseFunctionParamNames(tokens, source, defIdx)
-	if len(specTypes) == len(paramNames) && len(specTypes) > 0 {
-		for i, specType := range specTypes {
-			if specType != "" {
-				// Only set if not already overridden by pattern match (added later)
-				result[paramNames[i]] = specType
+	if defIdx >= 0 {
+		// Typespec inference: look backward from the def for a preceding @spec.
+		// Parse parameter types and match positionally to function param names.
+		specTypes := parseSpecParamTypes(tokens, source, defIdx)
+		paramNames := parseFunctionParamNames(tokens, source, defIdx)
+		if len(specTypes) == len(paramNames) && len(specTypes) > 0 {
+			for i, specType := range specTypes {
+				if specType != "" {
+					// Only set if not already overridden by pattern match (added later)
+					result[paramNames[i]] = specType
+				}
 			}
 		}
 	}
 
-	// Scan tokens from the function definition to the cursor.
+	scanStart := defIdx
+	if scanStart < 0 {
+		scanStart = moduleIdx
+	}
+	if scanStart < 0 {
+		scanStart = -1 // scan from index 0 (the +1 below becomes 0)
+	}
+
+	// Scan tokens from scanStart to the cursor.
 	// We look for two patterns:
 	//   Pattern A: %Module{...} = var   (struct on left, variable on right of =)
 	//   Pattern B: var = %Module{...}   (variable on left, struct on right of =)
-	for i := defIdx + 1; i < len(tokens); i++ {
+	for i := scanStart + 1; i < len(tokens); i++ {
 		tok := tokens[i]
 		if tok.Kind == parser.TokEOF || tok.Start >= offset {
 			break
@@ -613,7 +628,40 @@ func parseSpecParamTypes(tokens []parser.Token, source []byte, defIdx int) []str
 // Returns "__MODULE__" for bare t(), the module name for Module.t(),
 // or "" for anything else.
 func classifySpecType(tokens []parser.Token, source []byte, start, end int) string {
-	// Collect significant tokens in this range
+	if direct := classifyDirectStructType(tokens, source, start, end); direct != "" {
+		return direct
+	}
+
+	// Top-level union: split on `|` and pick the single unambiguous struct branch.
+	// Recognised branch shapes are:
+	//   - direct t() / Module.t()
+	//   - {:ok, t()} / {:ok, Module.t()}
+	// nil and error tuples are treated as "no struct" branches and skipped.
+	branches := splitTopLevelUnion(tokens, source, start, end)
+	if len(branches) <= 1 {
+		// No top-level pipe — try the single tuple/wrapper shapes.
+		return classifyWrappedStructType(tokens, source, start, end)
+	}
+
+	var found string
+	for _, br := range branches {
+		mod := classifyDirectStructType(tokens, source, br.start, br.end)
+		if mod == "" {
+			mod = classifyWrappedStructType(tokens, source, br.start, br.end)
+		}
+		if mod == "" {
+			continue
+		}
+		if found != "" && found != mod {
+			return ""
+		}
+		found = mod
+	}
+	return found
+}
+
+// classifyDirectStructType recognises t() and Module.t() at the top of the range.
+func classifyDirectStructType(tokens []parser.Token, source []byte, start, end int) string {
 	var sigTokens []int
 	for i := start; i < end; i++ {
 		if tokens[i].Kind != parser.TokEOL && tokens[i].Kind != parser.TokComment {
@@ -647,9 +695,12 @@ func classifySpecType(tokens []parser.Token, source []byte, start, end int) stri
 			tokens[sigTokens[last-3]].Kind == parser.TokDot &&
 			tokens[sigTokens[0]].Kind == parser.TokModule {
 
-			// Collect the module name from the leading tokens (everything before the last .t())
-			moduleRef, _ := tokCollectModuleName(source, tokens, len(tokens), sigTokens[0])
-			if moduleRef != "" && !knownNonStructTypes[moduleRef] {
+			// Collect the module name from the leading tokens. Require that
+			// the module-name walk consumes everything up to the `.t()` —
+			// otherwise we'd accept patterns like `User.t() | Account.t()`
+			// as just "User", silently dropping the rest of the type.
+			moduleRef, nextIdx := tokCollectModuleName(source, tokens, len(tokens), sigTokens[0])
+			if moduleRef != "" && !knownNonStructTypes[moduleRef] && nextIdx == sigTokens[last-3] {
 				return moduleRef
 			}
 		}
@@ -658,12 +709,86 @@ func classifySpecType(tokens []parser.Token, source []byte, start, end int) stri
 	return ""
 }
 
+// classifyWrappedStructType recognises {:ok, t()} and {:ok, Module.t()} tuples,
+// returning the inner struct module. Anything else returns "".
+func classifyWrappedStructType(tokens []parser.Token, source []byte, start, end int) string {
+	var sigTokens []int
+	for i := start; i < end; i++ {
+		if tokens[i].Kind != parser.TokEOL && tokens[i].Kind != parser.TokComment {
+			sigTokens = append(sigTokens, i)
+		}
+	}
+	// Need at least: { :ok , t ( ) }  — 7 tokens
+	if len(sigTokens) < 7 {
+		return ""
+	}
+	if tokens[sigTokens[0]].Kind != parser.TokOpenBrace {
+		return ""
+	}
+	last := len(sigTokens) - 1
+	if tokens[sigTokens[last]].Kind != parser.TokCloseBrace {
+		return ""
+	}
+	// Second token should be the :ok atom. The tokenizer represents :ok as
+	// a single TokAtom token covering ":ok".
+	atomTok := tokens[sigTokens[1]]
+	if atomTok.Kind != parser.TokAtom || parser.TokenText(source, atomTok) != ":ok" {
+		return ""
+	}
+	if tokens[sigTokens[2]].Kind != parser.TokComma {
+		return ""
+	}
+	// Inner type spans [sigTokens[3], sigTokens[last]) — everything between
+	// the comma after :ok and the closing brace.
+	return classifyDirectStructType(tokens, source, sigTokens[3], sigTokens[last])
+}
+
+// tokenRange describes a half-open token-index range [start, end).
+type tokenRange struct{ start, end int }
+
+// splitTopLevelUnion splits the token range [start, end) on top-level `|`
+// operators (Elixir's union type pipe). Nested brackets / parens / braces are
+// ignored. Returns the branch ranges, or a single-element slice if there's no
+// top-level pipe.
+func splitTopLevelUnion(tokens []parser.Token, source []byte, start, end int) []tokenRange {
+	var branches []tokenRange
+	depth := 0
+	branchStart := start
+	for i := start; i < end; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenParen, parser.TokOpenBracket, parser.TokOpenBrace:
+			depth++
+		case parser.TokCloseParen, parser.TokCloseBracket, parser.TokCloseBrace:
+			depth--
+		case parser.TokOther:
+			if depth == 0 && parser.TokenText(source, tokens[i]) == "|" {
+				branches = append(branches, tokenRange{branchStart, i})
+				branchStart = i + 1
+			}
+		}
+	}
+	branches = append(branches, tokenRange{branchStart, end})
+	return branches
+}
+
 // findSpecReturnType scans tokens for a @spec matching the given function name
 // and arity, and returns the struct module from its return type. Returns
 // "__MODULE__" for bare t(), the module name for Module.t(), or "".
 func findSpecReturnType(tokens []parser.Token, source []byte, funcName string, arity int) string {
+	structRef, _ := findSpecReturnTypeAfter(tokens, source, funcName, arity, 0)
+	return structRef
+}
+
+// findSpecReturnTypeAfter is like findSpecReturnType but only considers @spec
+// tokens whose start byte offset is at or after startOffset. Returns the struct
+// module reference and the @spec token's byte offset, or ("", -1) if not found.
+// Used to scope a search to a specific module's body in a multi-module file.
+func findSpecReturnTypeAfter(tokens []parser.Token, source []byte, funcName string, arity, startOffset int) (string, int) {
 	n := len(tokens)
 	for i := 0; i < n; i++ {
+		if tokens[i].Start < startOffset {
+			continue
+		}
 		if tokens[i].Kind != parser.TokAttrSpec {
 			continue
 		}
@@ -680,7 +805,7 @@ func findSpecReturnType(tokens []parser.Token, source []byte, funcName string, a
 		if parenIdx >= n || tokens[parenIdx].Kind != parser.TokOpenParen {
 			// Zero-arity spec without parens: @spec func :: return_type
 			if parenIdx < n && tokens[parenIdx].Kind == parser.TokDoubleColon && arity == 0 {
-				return parseSpecReturnType(tokens, source, n, parenIdx)
+				return parseSpecReturnType(tokens, source, n, parenIdx), tokens[i].Start
 			}
 			continue
 		}
@@ -702,9 +827,9 @@ func findSpecReturnType(tokens []parser.Token, source []byte, funcName string, a
 			continue
 		}
 
-		return parseSpecReturnType(tokens, source, n, colonIdx)
+		return parseSpecReturnType(tokens, source, n, colonIdx), tokens[i].Start
 	}
-	return ""
+	return "", -1
 }
 
 // countSpecParamArity counts parameters in a spec between openParen and closeParen
@@ -894,23 +1019,27 @@ func VariableFunctionCalls(tokens []parser.Token, source []byte, lineStarts []in
 		return nil
 	}
 
-	defIdx := -1
+	// Prefer the nearest enclosing def — function scope is the most common
+	// case and bounds the scan tightly. Fall back to the nearest enclosing
+	// module body so module-level assignments (compile-time bindings, ad-hoc
+	// test snippets) are still picked up.
+	scanStart := -1
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
 		if tok.Kind == parser.TokEOF || tok.Start >= offset {
 			break
 		}
-		if isFunctionDefinitionToken(tok.Kind) {
-			defIdx = i
+		if isFunctionDefinitionToken(tok.Kind) || tok.Kind == parser.TokDefmodule {
+			scanStart = i + 1
 		}
 	}
-	if defIdx < 0 {
-		return nil
+	if scanStart < 0 {
+		scanStart = 0
 	}
 
 	var results []VariableFunctionCall
 	seen := make(map[string]int) // varName -> index in results (last wins)
-	scanVariableFunctionCalls(tokens, source, defIdx+1, offset, &results, seen)
+	scanVariableFunctionCalls(tokens, source, scanStart, offset, &results, seen)
 	return results
 }
 
