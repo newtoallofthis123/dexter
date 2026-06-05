@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/remoteoss/dexter/internal/parser"
+	"github.com/remoteoss/dexter/internal/treesitter"
 )
 
 // TokenizedFile holds pre-tokenized source for efficient multi-operation queries.
@@ -342,6 +343,28 @@ func isExprToken(k parser.TokenKind) bool {
 	return k == parser.TokModule || k == parser.TokIdent || k == parser.TokAtom
 }
 
+// Remove the sigil prefix and suffix, returning the contents and length of the prefix.
+// Supports both double ("") and single (”) quotes, written inline and as heredocs.
+func sigilContents(tok parser.Token, source []byte) (xml []byte, prefixLen int) {
+	// remove ~H prefix
+	prefixLen += 2
+
+	// check for heredoc and trailing newline, fallback on inline sigil
+	quotes := string(source[tok.Start+prefixLen : tok.Start+prefixLen+4])
+
+	var quoteLen int
+	if quotes == "\"\"\"\n" || quotes == "'''\n" {
+		quoteLen = 4
+	} else {
+		quoteLen = 1
+	}
+
+	start := tok.Start + prefixLen + quoteLen
+	end := tok.End - quoteLen
+
+	return source[start:end], prefixLen + quoteLen
+}
+
 // ExpressionAtCursor extracts the dotted expression at the cursor position
 // using the token stream. Unlike the char-based ExtractExpression, this
 // correctly ignores expressions inside strings, comments, heredocs, sigils,
@@ -393,6 +416,23 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 		} else {
 			return CursorContext{}
 		}
+	}
+
+	if tok.Kind == parser.TokSigil {
+		// strip heredoc delimiters
+		// parse heredoc contents as XML
+		// check if substring at cursor offset is a live_component or function component
+		// if so, return synthetic expression using that component
+
+		// FIXME: support .heex files?
+		xml, prefixLen := sigilContents(tok, source)
+		sigilOffset := offset - (tok.Start + prefixLen)
+		treesitter.ParseHeexExpr(xml, uint(sigilOffset))
+
+		// log.Printf("xmlStr:\n%s\n", xmlStr)
+		// log.Printf("char: %c\n", xmlStr[offset-(tok.Start+6)])
+
+		return CursorContext{}
 	}
 
 	// Reject non-expression tokens (strings, comments, atoms, etc.)

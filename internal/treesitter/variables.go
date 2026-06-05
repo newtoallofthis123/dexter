@@ -1,8 +1,10 @@
 package treesitter
 
 import (
+	"log"
 	"strings"
 
+	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_elixir "github.com/tree-sitter/tree-sitter-elixir/bindings/go"
 )
@@ -21,6 +23,31 @@ func parseElixir(src []byte) (root *tree_sitter.Node, cleanup func()) {
 		tree.Close()
 		p.Close()
 	}
+}
+
+// parseHeex parses HEEX present within ~H sigils and in `.heex` files
+func parseHeex(src []byte) (root *tree_sitter.Node, cleanup func()) {
+	p := tree_sitter.NewParser()
+	if err := p.SetLanguage(tree_sitter.NewLanguage(tree_sitter_heex.Language())); err != nil {
+		p.Close()
+		return nil, nil
+	}
+	tree := p.Parse(src, nil)
+	return tree.RootNode(), func() {
+		tree.Close()
+		p.Close()
+	}
+}
+
+func ParseHeexExpr(src []byte, offset uint) {
+	root, cleanup := parseHeex(src)
+	if root == nil {
+		return
+	}
+	defer cleanup()
+
+	expr := root.DescendantForByteRange(offset, offset)
+	log.Printf("expr: %s %s\n", expr.ToSexp(), strings.TrimSpace(expr.Utf8Text(src)))
 }
 
 // VariableOccurrence is a position where a variable name appears.

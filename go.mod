@@ -18,6 +18,7 @@ replace github.com/tree-sitter/tree-sitter-elixir => github.com/elixir-lang/tree
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
+	github.com/phoenixframework/tree-sitter-heex v0.9.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.3.4 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
