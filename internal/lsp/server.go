@@ -614,8 +614,6 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		tf = NewTokenizedFile(text)
 	}
 
-	log.Printf("Definition: line=%d col=%d", lineNum, col)
-
 	// Check for @module_attribute reference first
 	if attrName := tf.ModuleAttributeAtCursor(lineNum, col); attrName != "" {
 		if line, found := FindModuleAttributeDefinition(text, attrName); found {

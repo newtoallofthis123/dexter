@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/remoteoss/dexter/internal/parser"
 )
 
@@ -433,6 +434,35 @@ func TestExpressionAtCursor_ExprBounds(t *testing.T) {
 	}
 	if ctx2.ExprEnd != 11 {
 		t.Errorf("ExprEnd = %d, want 11", ctx2.ExprEnd)
+	}
+}
+
+func TestExpressionAtCursor_HEEX(t *testing.T) {
+	tests := []struct {
+		code      string
+		line, col int
+		want      CursorContext
+	}{
+		{"~H\"\"\"\n<.foo />\n\"\"\"", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 8, ExprEnd: 11}},
+		{"~H'''\n<.foo />\n'''", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 8, ExprEnd: 11}},
+		{"~H\"<.foo />\"", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
+		{"~H'<.foo />'", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
+		{"~H[<.foo />]", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
+		{"~H[<Foo.bar />]", 0, 5, CursorContext{ModuleRef: "Foo", FunctionName: "bar", ExprStart: 4, ExprEnd: 11}},
+		{"~H[<.live_component module={Foo.Bar} />]", 0, 28, CursorContext{ModuleRef: "Foo", ExprStart: 28, ExprEnd: 31}},
+		{"~H[<.live_component module={Foo.Bar} />]", 0, 32, CursorContext{ModuleRef: "Foo.Bar", ExprStart: 28, ExprEnd: 35}},
+		// interpolated expressions that aren't module/function should be ignored
+		{"~H[<div n={1} />]", 0, 11, CursorContext{}},
+		// HTML tags should be ignored
+		{"~H[<div n={1} />]", 0, 4, CursorContext{}},
+	}
+
+	for _, tt := range tests {
+		tokens, source, lineStarts := tokenize(tt.code)
+		got := ExpressionAtCursor(tokens, source, lineStarts, tt.line, tt.col)
+		if diff := cmp.Diff(tt.want, got); diff != "" {
+			t.Errorf("ExpressionAtCursor(_, %#v, _, %d, %d)\nparse mismatch (-want +got):\n%s", tt.code, tt.line, tt.col, diff)
+		}
 	}
 }
 

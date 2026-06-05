@@ -345,24 +345,24 @@ func isExprToken(k parser.TokenKind) bool {
 
 // Remove the sigil prefix and suffix, returning the contents and length of the prefix.
 // Supports both double ("") and single (”) quotes, written inline and as heredocs.
-func sigilContents(tok parser.Token, source []byte) (xml []byte, prefixLen int) {
+func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, prefixLen int) {
 	// remove ~H prefix
 	prefixLen += 2
 
 	// check for heredoc and trailing newline, fallback on inline sigil
 	quotes := string(source[tok.Start+prefixLen : tok.Start+prefixLen+4])
 
-	var quoteLen int
+	var delimLen int
 	if quotes == "\"\"\"\n" || quotes == "'''\n" {
-		quoteLen = 4
+		delimLen = 4
 	} else {
-		quoteLen = 1
+		delimLen = 1
 	}
 
-	start := tok.Start + prefixLen + quoteLen
-	end := tok.End - quoteLen
+	start := tok.Start + prefixLen + delimLen
+	end := tok.End - delimLen
 
-	return source[start:end], prefixLen + quoteLen
+	return source[start:end], string(source[tok.Start:][1:2]), prefixLen + delimLen
 }
 
 // ExpressionAtCursor extracts the dotted expression at the cursor position
@@ -418,21 +418,55 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 		}
 	}
 
+	// Parse `~H` HEEX sigils
 	if tok.Kind == parser.TokSigil {
-		// strip heredoc delimiters
-		// parse heredoc contents as XML
-		// check if substring at cursor offset is a live_component or function component
-		// if so, return synthetic expression using that component
-
-		// FIXME: support .heex files?
-		xml, prefixLen := sigilContents(tok, source)
+		xml, sigil, prefixLen := sigilContents(tok, source)
+		if sigil != "H" {
+			return CursorContext{}
+		}
 		sigilOffset := offset - (tok.Start + prefixLen)
-		treesitter.ParseHeexExpr(xml, uint(sigilOffset))
+		heexExpr := treesitter.ParseHeexExpr(xml, uint(sigilOffset))
+		if heexExpr == nil {
+			return CursorContext{}
+		}
 
-		// log.Printf("xmlStr:\n%s\n", xmlStr)
-		// log.Printf("char: %c\n", xmlStr[offset-(tok.Start+6)])
+		if heexExpr.Expr != "" {
+			// Recursively parse interpolated HEEX expressions.
+			// <div class={class()} />
+			//             ^^^^^^^
+			tf := NewTokenizedFile(heexExpr.Expr)
+			line, col := parser.OffsetToLineCol(tf.lineStarts, sigilOffset-int(heexExpr.Offset))
+			ctx := expressionAtCursorImpl(tf.tokens, tf.source, tf.lineStarts, line, col, full)
 
-		return CursorContext{}
+			if !ctx.Empty() {
+				// We've parsed the expression as though it were its own document,
+				// so we need to offset it's start/end indices to the outer document.
+				nestedOffset := tok.Start + prefixLen + int(heexExpr.Offset)
+				ctx.ExprStart += nestedOffset
+				ctx.ExprEnd += nestedOffset
+			}
+
+			return ctx
+		} else {
+			// Heex function components are syntax sugar for module/function expressions.
+			// <Foo.bar />
+			//  ^^^^^^^
+			// <.baz></.baz>
+			//   ^^^
+			exprStart := tok.Start + prefixLen + int(heexExpr.Offset)
+			exprEnd := exprStart + len(heexExpr.Module) + len(heexExpr.Function)
+			if heexExpr.Module != "" {
+				// offset by additional 1 for "." dot character between module/function
+				exprEnd += 1
+			}
+
+			return CursorContext{
+				ModuleRef:    heexExpr.Module,
+				FunctionName: heexExpr.Function,
+				ExprStart:    exprStart,
+				ExprEnd:      exprEnd,
+			}
+		}
 	}
 
 	// Reject non-expression tokens (strings, comments, atoms, etc.)

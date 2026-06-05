@@ -1,7 +1,7 @@
 package treesitter
 
 import (
-	"log"
+	"slices"
 	"strings"
 
 	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
@@ -39,15 +39,109 @@ func parseHeex(src []byte) (root *tree_sitter.Node, cleanup func()) {
 	}
 }
 
-func ParseHeexExpr(src []byte, offset uint) {
+// A HEEX expression may either be a:
+// - function call with optional module prefix
+// - interpolated expression (`{..}` between curly braces)
+// If `expr` is set, `module` / `function` will be empty.
+// Otherwise, `function` will be set and `module` may also be set.
+// `module` will be either a single module e.g. `Foo` or module chain e.g. `Foo.Bar`
+type HeexExpr struct {
+	Module, Function string
+	Expr             string
+	Offset           uint
+}
+
+func ParseHeexExpr(src []byte, cursorOffset uint) *HeexExpr {
 	root, cleanup := parseHeex(src)
 	if root == nil {
-		return
+		return nil
 	}
 	defer cleanup()
 
-	expr := root.DescendantForByteRange(offset, offset)
-	log.Printf("expr: %s %s\n", expr.ToSexp(), strings.TrimSpace(expr.Utf8Text(src)))
+	expr := root.DescendantForByteRange(cursorOffset, cursorOffset)
+	if expr == nil {
+		return nil
+	}
+
+	if expr.Kind() == "expression_value" {
+		return &HeexExpr{
+			Expr:   expr.Utf8Text(src),
+			Offset: expr.StartByte(),
+		}
+	}
+
+	// Look for module, function, or module.function expression under cursor, e.g.
+	// `Foo`, `bar`, `Foo.bar`, or `Foo.Bar.baz`
+	if expr.Kind() != "." && expr.Kind() != "module" && expr.Kind() != "function" {
+		return nil
+	}
+
+	// Find the nearest ancestor with one of the given kinds.
+	nearest := func(node *tree_sitter.Node, kinds ...string) *tree_sitter.Node {
+		for ; node != nil; node = node.Parent() {
+			if slices.Contains(kinds, node.Kind()) {
+				return node
+			}
+		}
+		return nil
+	}
+
+	// Find the first named child of the given kind.
+	namedChild := func(node *tree_sitter.Node, kind string) *tree_sitter.Node {
+		for i := uint(0); i < node.NamedChildCount(); i++ {
+			child := node.NamedChild(i)
+			if child.Kind() == kind {
+				return child
+			}
+		}
+		return nil
+	}
+
+	tag := nearest(expr, "component", "self_closing_component")
+	if tag == nil {
+		return nil
+	}
+
+	var compName *tree_sitter.Node
+	if tag.Kind() == "component" {
+		// <.foo>..</.foo>
+		// (component (start_component (component_name _)) _)
+		startComp := namedChild(tag, "start_component")
+		if startComp == nil {
+			return nil
+		}
+
+		compName = namedChild(startComp, "component_name")
+	} else if tag.Kind() == "self_closing_component" {
+		// <.foo />
+		// (self_closing_component (component_name _) _)
+		compName = namedChild(tag, "component_name")
+	}
+
+	if compName == nil {
+		return nil
+	}
+
+	moduleNode := namedChild(compName, "module")
+	funcNode := namedChild(compName, "function")
+
+	var module string
+	var offset uint
+	// module prefix is optional
+	if moduleNode != nil {
+		module = moduleNode.Utf8Text(src)
+		offset = moduleNode.StartByte()
+	} else {
+		offset = funcNode.StartByte()
+	}
+
+	function := funcNode.Utf8Text(src)
+
+	return &HeexExpr{
+		Module:   module,
+		Function: function,
+		Offset:   offset,
+	}
 }
 
 // VariableOccurrence is a position where a variable name appears.

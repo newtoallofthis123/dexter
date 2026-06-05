@@ -3,7 +3,9 @@ module github.com/remoteoss/dexter
 go 1.26.1
 
 require (
+	github.com/google/go-cmp v0.5.6
 	github.com/mattn/go-sqlite3 v1.14.38
+	github.com/phoenixframework/tree-sitter-heex v0.9.0
 	github.com/spf13/cobra v1.10.2
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-elixir v0.3.5
@@ -18,7 +20,6 @@ replace github.com/tree-sitter/tree-sitter-elixir => github.com/elixir-lang/tree
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
-	github.com/phoenixframework/tree-sitter-heex v0.9.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.3.4 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
