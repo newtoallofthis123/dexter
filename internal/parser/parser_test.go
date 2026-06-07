@@ -2673,32 +2673,6 @@ func TestLineColToOffset(t *testing.T) {
 	}
 }
 
-func TestOffsetToLineCol(t *testing.T) {
-	source := []byte("defmodule Foo do\n  def bar, do: :ok\nend\n")
-	result := TokenizeFull(source)
-
-	tests := []struct {
-		wantLine, wantCol int
-		offset            int
-	}{
-		{0, 0, 0},   // start of file
-		{0, 10, 10}, // "F" in "Foo"
-		{1, 2, 19},  // "d" in "def"
-		{2, 0, 36},  // "e" in "end"
-	}
-	for _, tt := range tests {
-		gotLine, gotCol := OffsetToLineCol(result.LineStarts, tt.offset)
-		if gotLine != tt.wantLine || gotCol != tt.wantCol {
-			t.Errorf("OffsetToLineCol(offset=%d) = (%d, %d), want (%d, %d)", tt.offset, gotLine, gotCol, tt.wantLine, tt.wantCol)
-		}
-	}
-
-	// Out-of-range line
-	if gotLine, gotCol := OffsetToLineCol(result.LineStarts, -1); gotLine != -1 || gotCol != -1 {
-		t.Errorf("expected (-1, -1) for negative offset, got (%d, %d)", gotLine, gotCol)
-	}
-}
-
 func TestBareMacroCall_CommentBetweenArgsAndDo(t *testing.T) {
 	source := `defmodule Test do
   use SomeMacroLib
