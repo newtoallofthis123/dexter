@@ -809,7 +809,7 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 
 	xml := source[contentsStart:contentsEnd]
 	treesitter.ParseHeex(xml, func(kind, text string, offset int) {
-		lineInHeex := lineOffset(source, contentsStart+offset)
+		line_ := lineOffset(source, contentsStart+offset) + 1
 		offset += contentsStart
 		n := len(text)
 
@@ -825,27 +825,27 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 					Kind:  t.Kind,
 					Start: t.Start + offset,
 					End:   t.End + offset,
-					Line:  t.Line + line + lineInHeex,
+					Line:  t.Line + line_ - 1,
 				})
 			}
 
 			// FIXME: how do we need to update lineStarts?
 			// for _, l := range res.LineStarts[1:] {
-			// 	*lineStarts = append(*lineStarts, line + lineInHeex)
+			// 	*lineStarts = append(*lineStarts, line_)
 			// }
 
 		case "module":
-			*tokens = append(*tokens, Token{Kind: TokModule, Start: offset, End: offset + n, Line: line + lineInHeex})
+			*tokens = append(*tokens, Token{Kind: TokModule, Start: offset, End: offset + n, Line: line_})
 
 		case "function":
-			*tokens = append(*tokens, Token{Kind: TokIdent, Start: offset, End: offset + n, Line: line + lineInHeex})
+			*tokens = append(*tokens, Token{Kind: TokIdent, Start: offset, End: offset + n, Line: line_})
 
 		case ".":
-			*tokens = append(*tokens, Token{Kind: TokDot, Start: offset, End: offset + 1, Line: line + lineInHeex})
+			*tokens = append(*tokens, Token{Kind: TokDot, Start: offset, End: offset + 1, Line: line_})
 
 		default:
 			// The remainder of the sigil's contents are ignored.
-			*tokens = append(*tokens, Token{Kind: TokOther, Start: offset, End: offset + n, Line: line + lineInHeex})
+			*tokens = append(*tokens, Token{Kind: TokOther, Start: offset, End: offset + n, Line: line_})
 		}
 	})
 

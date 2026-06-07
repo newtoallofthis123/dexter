@@ -29,6 +29,9 @@ func parseElixir(src []byte) (root *tree_sitter.Node, cleanup func()) {
 // and make them available in `heex`, keyed by the parent `quoted_contents` node in `root`
 func parseElixirExtended(src []byte) (root *tree_sitter.Node, heex map[*tree_sitter.Node]*tree_sitter.Node, cleanup func()) {
 	root, cleanupElixir := parseElixir(src)
+	if root == nil {
+		return nil, nil, nil
+	}
 
 	var cleanupHeex [](func())
 	heex = make(map[*tree_sitter.Node]*tree_sitter.Node)
@@ -37,6 +40,10 @@ func parseElixirExtended(src []byte) (root *tree_sitter.Node, heex map[*tree_sit
 			node.Parent().Kind() == "sigil" &&
 			/* sigil_name */ node.PrevNamedSibling().Utf8Text(src) == "H" {
 			heexRoot, cleanup_ := parseHeex(src[node.StartByte():node.EndByte()])
+			if heexRoot == nil {
+				return
+			}
+
 			heex[node] = heexRoot
 			cleanupHeex = append(cleanupHeex, cleanup_)
 		}
