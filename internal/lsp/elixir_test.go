@@ -443,18 +443,27 @@ func TestExpressionAtCursor_HEEX(t *testing.T) {
 		line, col int
 		want      CursorContext
 	}{
-		{"~H\"\"\"\n<.foo />\n\"\"\"", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 8, ExprEnd: 11}},
-		{"~H'''\n<.foo />\n'''", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 8, ExprEnd: 11}},
+		// all delimiter styles should be supported
+		{"~H\"\"\"\n<.foo />\n\"\"\"", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 2, ExprEnd: 5}},
+		{"~H'''\n<.foo />\n'''", 1, 2, CursorContext{FunctionName: "foo", ExprStart: 2, ExprEnd: 5}},
 		{"~H\"<.foo />\"", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
 		{"~H'<.foo />'", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
 		{"~H[<.foo />]", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
+		// newline after delimiter is optional
+		{"~H\"\"\"<.foo />\"\"\"", 0, 7, CursorContext{FunctionName: "foo", ExprStart: 7, ExprEnd: 10}},
 		{"~H[<Foo.bar />]", 0, 5, CursorContext{ModuleRef: "Foo", FunctionName: "bar", ExprStart: 4, ExprEnd: 11}},
 		{"~H[<.live_component module={Foo.Bar} />]", 0, 28, CursorContext{ModuleRef: "Foo", ExprStart: 28, ExprEnd: 31}},
 		{"~H[<.live_component module={Foo.Bar} />]", 0, 32, CursorContext{ModuleRef: "Foo.Bar", ExprStart: 28, ExprEnd: 35}},
+		{"~H'''\n<.live_component module={Foo.Bar} />\n'''", 1, 29, CursorContext{ModuleRef: "Foo.Bar", ExprStart: 25, ExprEnd: 32}},
 		// interpolated expressions that aren't module/function should be ignored
 		{"~H[<div n={1} />]", 0, 11, CursorContext{}},
 		// HTML tags should be ignored
 		{"~H[<div n={1} />]", 0, 4, CursorContext{}},
+		// custom sigils should be parsed correctly but ignored
+		{"~x[_]", 0, 3, CursorContext{}},
+		{"~X[_]", 0, 3, CursorContext{}},
+		{"~XXX[_]", 0, 5, CursorContext{}},
+		{"~X12[_]", 0, 5, CursorContext{}},
 	}
 
 	for _, tt := range tests {
@@ -613,7 +622,7 @@ end`
 		text := `defmodule MyApp.Web do
   alias MyApp.Services.{
     Accounts,
-  
+
   def foo do
     # missing close brace
   end

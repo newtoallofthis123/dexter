@@ -346,15 +346,28 @@ func isExprToken(k parser.TokenKind) bool {
 // Remove the sigil prefix and suffix, returning the contents and length of the prefix.
 // Supports both double ("") and single (”) quotes, written inline and as heredocs.
 func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, prefixLen int) {
-	// remove ~H prefix
-	prefixLen += 2
+	// remove ~ prefix
+	prefixLen = 1
+
+	// remove sigil character(s)
+	// > Custom sigils may be either a single lowercase character, or an uppercase
+	// > character followed by more uppercase characters and digits.
+	// > https://elixir.hexdocs.pm/sigils.html
+	for {
+		c := rune(source[prefixLen])
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
+			prefixLen += 1
+		} else {
+			break
+		}
+	}
 
 	// check for heredoc and trailing newline, fallback on inline sigil
 	quotes := string(source[tok.Start+prefixLen : tok.Start+prefixLen+4])
 
 	var delimLen int
-	if quotes == "\"\"\"\n" || quotes == "'''\n" {
-		delimLen = 4
+	if quotes == "\"\"\"" || quotes == "'''" {
+		delimLen = 3
 	} else {
 		delimLen = 1
 	}
@@ -418,6 +431,11 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 		}
 	}
 
+	lineStart := 0
+	if line < len(lineStarts) {
+		lineStart = lineStarts[line]
+	}
+
 	// Parse `~H` HEEX sigils
 	if tok.Kind == parser.TokSigil {
 		xml, sigil, prefixLen := sigilContents(tok, source)
@@ -441,7 +459,7 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 			if !ctx.Empty() {
 				// We've parsed the expression as though it were its own document,
 				// so we need to offset it's start/end indices to the outer document.
-				nestedOffset := tok.Start + prefixLen + int(heexExpr.Offset)
+				nestedOffset := tok.Start + prefixLen + int(heexExpr.Offset) - lineStart
 				ctx.ExprStart += nestedOffset
 				ctx.ExprEnd += nestedOffset
 			}
@@ -453,7 +471,7 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 			//  ^^^^^^^
 			// <.baz></.baz>
 			//   ^^^
-			exprStart := tok.Start + prefixLen + int(heexExpr.Offset)
+			exprStart := tok.Start + prefixLen + int(heexExpr.Offset) - lineStart
 			exprEnd := exprStart + len(heexExpr.Module) + len(heexExpr.Function)
 			if heexExpr.Module != "" {
 				// offset by additional 1 for "." dot character between module/function
@@ -508,11 +526,6 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 	}
 
 	// Build module ref and function name from the token chain
-	lineStart := 0
-	if line < len(lineStarts) {
-		lineStart = lineStarts[line]
-	}
-
 	var moduleParts []string
 	functionName := ""
 
