@@ -661,6 +661,10 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		// The first occurrence in scope is the definition (pattern/assignment).
 		if tree, src, release, ok := s.docs.GetTree(docURI); ok {
 			defer release()
+
+			// FIXME: remove
+			treesitter.FindVariableOccurrences(src, uint(lineNum), uint(col))
+
 			if occs := treesitter.FindVariableOccurrencesWithTree(tree.RootNode(), src, uint(lineNum), uint(col)); len(occs) > 0 {
 				s.debugf("Definition: returning variable definition at line %d", occs[0].Line)
 				return []protocol.Location{{

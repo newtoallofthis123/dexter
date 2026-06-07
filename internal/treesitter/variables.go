@@ -1,6 +1,7 @@
 package treesitter
 
 import (
+	"log"
 	"strings"
 
 	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
@@ -21,6 +22,31 @@ func parseElixir(src []byte) (root *tree_sitter.Node, cleanup func()) {
 	return tree.RootNode(), func() {
 		tree.Close()
 		p.Close()
+	}
+}
+
+// parseElixirExtended is similar to parseElixir but will also parse embedded HEEX templates
+// and make them available in `heex`, keyed by the parent `quoted_contents` node in `root`
+func parseElixirExtended(src []byte) (root *tree_sitter.Node, heex map[*tree_sitter.Node]*tree_sitter.Node, cleanup func()) {
+	root, cleanupElixir := parseElixir(src)
+
+	var cleanupHeex [](func())
+	heex = make(map[*tree_sitter.Node]*tree_sitter.Node)
+	visitTree(root, func(node *tree_sitter.Node) {
+		if node.Kind() == "quoted_content" &&
+			node.Parent().Kind() == "sigil" &&
+			/* sigil_name */ node.PrevNamedSibling().Utf8Text(src) == "H" {
+			heexRoot, cleanup_ := parseHeex(src[node.StartByte():node.EndByte()])
+			heex[node] = heexRoot
+			cleanupHeex = append(cleanupHeex, cleanup_)
+		}
+	})
+
+	return root, heex, func() {
+		for _, c := range cleanupHeex {
+			c()
+		}
+		cleanupElixir()
 	}
 }
 
@@ -48,16 +74,21 @@ func ParseHeex(src []byte, onNode func(kind, text string, offset int)) {
 	}
 	defer cleanup()
 
+	visitTree(root, func(node *tree_sitter.Node) {
+		// notify visitor about leaf nodes
+		if node.ChildCount() == 0 {
+			onNode(node.Kind(), node.Utf8Text(src), int(node.StartByte()))
+		}
+	})
+}
+
+func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {
 	cursor := root.Walk()
 	defer cursor.Close()
 
 	for {
 		// visit current node
-		node := cursor.Node()
-		if node.ChildCount() == 0 {
-			// notify visitor about leaf nodes
-			onNode(node.Kind(), node.Utf8Text(src), int(node.StartByte()))
-		}
+		onNode(cursor.Node())
 
 		// traverse down one level, if possible
 		if cursor.GotoFirstChild() {
@@ -89,7 +120,11 @@ type VariableOccurrence struct {
 // occurrences of the variable at the given cursor position within the
 // enclosing function scope. Returns nil if the cursor is not on a variable.
 func FindVariableOccurrences(src []byte, line, col uint) []VariableOccurrence {
-	root, cleanup := parseElixir(src)
+	root, heex, cleanup := parseElixirExtended(src)
+	// FIXME: remove
+	for p, h := range heex {
+		log.Printf("%s\n%s\n", p.Utf8Text(src), h.ToSexp())
+	}
 	if root == nil {
 		return nil
 	}
