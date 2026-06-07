@@ -3,6 +3,8 @@ package parser
 import (
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/remoteoss/dexter/internal/treesitter"
 )
 
 // TokenKind identifies the kind of a lexed token.
@@ -235,20 +237,7 @@ func TokenizeFull(source []byte) TokenResult {
 			// Single-char sigils: ~r, ~s, ~S, etc.
 			// Multi-char sigils (Elixir 1.15+): ~HTML, ~HEEX — uppercase only.
 			if i+1 < len(source) && isLetter(source[i+1]) {
-				start := i
-				startLine := line
-				sigilLetter := source[i+1]
-				i += 2 // consume ~ and first letter
-				// Multi-char sigils: continue reading uppercase letters
-				if isUpper(sigilLetter) {
-					for i < len(source) && isUpper(source[i]) {
-						i++
-					}
-				}
-				if i < len(source) {
-					i, line = scanSigilContent(source, i, line, sigilLetter, &lineStarts)
-				}
-				tokens = append(tokens, Token{Kind: TokSigil, Start: start, End: i, Line: startLine})
+				i, line = scanSigil(source, i, line, &lineStarts, &tokens)
 			} else {
 				tokens = append(tokens, Token{Kind: TokOther, Start: i, End: i + 1, Line: line})
 				i++
@@ -617,11 +606,7 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int) (int, int)
 				i++ // single char like ?} or ?a
 			}
 		case c == '~' && i+1 < len(source) && isLetter(source[i+1]):
-			sigilLetter := source[i+1]
-			i += 2 // consume ~ and letter
-			if i < len(source) {
-				i, line = scanSigilContent(source, i, line, sigilLetter, lineStarts)
-			}
+			i, line = scanSigil(source, i, line, lineStarts, nil)
 		case c == '#' && i+1 < len(source) && source[i+1] == '{':
 			i += 2
 			i, line = scanInterpolation(source, i, line, lineStarts)
@@ -672,113 +657,199 @@ func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]in
 	return i, line
 }
 
-// scanSigilContent scans from the opening delimiter of a sigil to its closing delimiter,
-// including any trailing modifier letters. Returns new position and updated line count.
-// sigilLetter is the letter after ~ (e.g. 's' in ~s, 'S' in ~S). Uppercase sigil letters
-// mean the content is "raw" — backslash is NOT an escape character.
-func scanSigilContent(source []byte, i, line int, sigilLetter byte, lineStarts *[]int) (int, int) {
+// scanSigil scans from the start of a sigil to its closing delimiter, including any trailing
+// modifier letters. Returns new position and updated line count, adding any tokens encountered
+// along the way if `tokens` is provided.
+func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
 	if i >= len(source) {
 		return i, line
 	}
 
+	// sigilLetter is the letter after ~ (e.g. 's' in ~s, 'S' in ~S). Uppercase sigil
+	// letters mean the content is "raw" — backslash is NOT an escape character.
+	start := i
+	startLine := line
+	sigilLetter := source[i+1]
+	i += 2 // consume ~ and first letter
+	// Multi-char sigils: continue reading uppercase letters/numbers
+	if isUpper(sigilLetter) {
+		for i < len(source) && (isUpper(source[i]) || isDigit(source[i])) {
+			i++
+		}
+	}
+
+	sigilChars := string(source[start+1 : i])
+
 	escapes := isLower(sigilLetter) // only lowercase sigils process escapes
 	openCh := source[i]
+
+	var contentsStart, contentsEnd int
 
 	// Check for heredoc sigil: ~s""" or ~S"""
 	if openCh == '"' && i+2 < len(source) && source[i+1] == '"' && source[i+2] == '"' {
 		i += 3 // consume """
+		contentsStart = i
 		if escapes {
 			i, line = scanHeredocContent(source, i, line, '"', lineStarts)
 		} else {
 			i, line = scanRawHeredocContent(source, i, line, '"', lineStarts)
 		}
-		return i, line
-	}
-	if openCh == '\'' && i+2 < len(source) && source[i+1] == '\'' && source[i+2] == '\'' {
+		contentsEnd = i - 3
+	} else if openCh == '\'' && i+2 < len(source) && source[i+1] == '\'' && source[i+2] == '\'' {
 		i += 3 // consume '''
+		contentsStart = i
 		if escapes {
 			i, line = scanHeredocContent(source, i, line, '\'', lineStarts)
 		} else {
 			i, line = scanRawHeredocContent(source, i, line, '\'', lineStarts)
 		}
-		return i, line
-	}
-
-	i++ // consume opening delimiter
-
-	var closeCh byte
-	nested := false
-
-	switch openCh {
-	case '(':
-		closeCh = ')'
-		nested = true
-	case '[':
-		closeCh = ']'
-		nested = true
-	case '{':
-		closeCh = '}'
-		nested = true
-	case '<':
-		closeCh = '>'
-		nested = true
-	default:
-		closeCh = openCh
-		nested = false
-	}
-
-	if nested {
-		depth := 1
-		for i < len(source) && depth > 0 {
-			ch := source[i]
-			if ch == '\n' {
-				line++
-				i++
-				*lineStarts = append(*lineStarts, i)
-			} else if escapes && ch == '\\' && i+1 < len(source) {
-				if source[i+1] == '\n' {
-					line++
-					*lineStarts = append(*lineStarts, i+2)
-				}
-				i += 2
-			} else if ch == openCh {
-				depth++
-				i++
-			} else if ch == closeCh {
-				depth--
-				i++
-			} else {
-				i++
-			}
-		}
+		contentsEnd = i - 3
 	} else {
-		for i < len(source) {
-			ch := source[i]
-			if ch == '\n' {
-				line++
-				i++
-				*lineStarts = append(*lineStarts, i)
-			} else if escapes && ch == '\\' && i+1 < len(source) {
-				if source[i+1] == '\n' {
+		i++ // consume opening delimiter
+		contentsStart = i
+
+		var closeCh byte
+		nested := false
+
+		switch openCh {
+		case '(':
+			closeCh = ')'
+			nested = true
+		case '[':
+			closeCh = ']'
+			nested = true
+		case '{':
+			closeCh = '}'
+			nested = true
+		case '<':
+			closeCh = '>'
+			nested = true
+		default:
+			closeCh = openCh
+			nested = false
+		}
+
+		if nested {
+			depth := 1
+			for i < len(source) && depth > 0 {
+				ch := source[i]
+				if ch == '\n' {
 					line++
-					*lineStarts = append(*lineStarts, i+2)
+					i++
+					*lineStarts = append(*lineStarts, i)
+				} else if escapes && ch == '\\' && i+1 < len(source) {
+					if source[i+1] == '\n' {
+						line++
+						*lineStarts = append(*lineStarts, i+2)
+					}
+					i += 2
+				} else if ch == openCh {
+					depth++
+					i++
+				} else if ch == closeCh {
+					depth--
+					i++
+				} else {
+					i++
 				}
-				i += 2
-			} else if ch == closeCh {
-				i++ // consume closing delimiter
-				break
-			} else {
-				i++
 			}
+		} else {
+			for i < len(source) {
+				ch := source[i]
+				if ch == '\n' {
+					line++
+					i++
+					*lineStarts = append(*lineStarts, i)
+				} else if escapes && ch == '\\' && i+1 < len(source) {
+					if source[i+1] == '\n' {
+						line++
+						*lineStarts = append(*lineStarts, i+2)
+					}
+					i += 2
+				} else if ch == closeCh {
+					i++ // consume closing delimiter
+					break
+				} else {
+					i++
+				}
+			}
+		}
+
+		contentsEnd = i - 1
+
+		// Consume trailing modifier letters (e.g. the 'i' in ~r/foo/i)
+		for i < len(source) && isLetter(source[i]) {
+			i++
 		}
 	}
 
-	// Consume trailing modifier letters (e.g. the 'i' in ~r/foo/i)
-	for i < len(source) && isLetter(source[i]) {
-		i++
+	// emit tokens if requested
+	if tokens != nil {
+		scanSigilContents(sigilChars, source, start, i, contentsStart, contentsEnd, startLine, lineStarts, tokens)
 	}
 
 	return i, line
+}
+
+func scanSigilContents(sigilChars string, source []byte, start, end, contentsStart, contentsEnd, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+	// only scan the contents of HEEX `~H` sigils
+	if sigilChars != "H" {
+		*tokens = append(*tokens, Token{Kind: TokSigil, Start: start, End: end, Line: line})
+		return start, line
+	}
+
+	lineOffset := func(src []byte, offset int) (lines int) {
+		for i := 0; i < offset; i++ {
+			if src[i] == '\n' {
+				lines++
+			}
+		}
+		return
+	}
+
+	xml := source[contentsStart:contentsEnd]
+	treesitter.ParseHeex(xml, func(kind, text string, offset int) {
+		lineInHeex := lineOffset(source, contentsStart+offset)
+		offset += contentsStart
+		n := len(text)
+
+		switch kind {
+		case "expression_value":
+			res := TokenizeFull([]byte(text))
+
+			for _, t := range res.Tokens {
+				if t.Kind == TokEOF {
+					continue
+				}
+				*tokens = append(*tokens, Token{
+					Kind:  t.Kind,
+					Start: t.Start + offset,
+					End:   t.End + offset,
+					Line:  t.Line + line + lineInHeex,
+				})
+			}
+
+			// FIXME: how do we need to update lineStarts?
+			// for _, l := range res.LineStarts[1:] {
+			// 	*lineStarts = append(*lineStarts, line + lineInHeex)
+			// }
+
+		case "module":
+			*tokens = append(*tokens, Token{Kind: TokModule, Start: offset, End: offset + n, Line: line + lineInHeex})
+
+		case "function":
+			*tokens = append(*tokens, Token{Kind: TokIdent, Start: offset, End: offset + n, Line: line + lineInHeex})
+
+		case ".":
+			*tokens = append(*tokens, Token{Kind: TokDot, Start: offset, End: offset + 1, Line: line + lineInHeex})
+
+		default:
+			// The remainder of the sigil's contents are ignored.
+			*tokens = append(*tokens, Token{Kind: TokOther, Start: offset, End: offset + n, Line: line + lineInHeex})
+		}
+	})
+
+	return start, line
 }
 
 // scanRawHeredocContent scans a heredoc body where backslash is NOT an escape character

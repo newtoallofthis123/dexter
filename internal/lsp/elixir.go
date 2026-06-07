@@ -7,7 +7,6 @@ import (
 	"unicode"
 
 	"github.com/remoteoss/dexter/internal/parser"
-	"github.com/remoteoss/dexter/internal/treesitter"
 )
 
 // TokenizedFile holds pre-tokenized source for efficient multi-operation queries.
@@ -343,47 +342,6 @@ func isExprToken(k parser.TokenKind) bool {
 	return k == parser.TokModule || k == parser.TokIdent || k == parser.TokAtom
 }
 
-// Remove the sigil prefix and suffix, returning the contents and length of the prefix.
-// Supports both double ("") and single (”) quotes, written inline and as heredocs.
-func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, prefixLen int) {
-	// remove ~ prefix
-	prefixLen = 1
-
-	// remove sigil character(s)
-	// > Custom sigils may be either a single lowercase character, or an uppercase
-	// > character followed by more uppercase characters and digits.
-	// > https://elixir.hexdocs.pm/sigils.html
-	for {
-		c := rune(source[tok.Start+prefixLen])
-		if unicode.IsLetter(c) || unicode.IsDigit(c) {
-			prefixLen += 1
-		} else {
-			break
-		}
-	}
-
-	// check for heredoc, fallback on inline sigil
-	quotes := string(source[tok.Start+prefixLen:][:4])
-
-	var delimLen int
-	if quotes == "\"\"\"" || quotes == "'''" {
-		delimLen = 3
-	} else {
-		delimLen = 1
-	}
-
-	// ignore trailing modifier characters
-	end := tok.End
-	for unicode.IsLetter(rune(source[end-1])) {
-		end--
-	}
-
-	start := tok.Start + prefixLen + delimLen
-	end -= delimLen
-
-	return source[start:end], string(source[tok.Start:][1:2]), prefixLen + delimLen
-}
-
 // ExpressionAtCursor extracts the dotted expression at the cursor position
 // using the token stream. Unlike the char-based ExtractExpression, this
 // correctly ignores expressions inside strings, comments, heredocs, sigils,
@@ -437,63 +395,6 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 		}
 	}
 
-	lineStart := 0
-	if line < len(lineStarts) {
-		lineStart = lineStarts[line]
-	}
-
-	// Parse `~H` HEEX sigils
-	if tok.Kind == parser.TokSigil {
-		xml, sigil, prefixLen := sigilContents(tok, source)
-		// ignore non-H sigils and when the cursor is on the sigil character/delimiter
-		if sigil != "H" || offset < tok.Start+prefixLen {
-			return CursorContext{}
-		}
-		sigilOffset := offset - (tok.Start + prefixLen)
-		heexExpr := treesitter.ParseHeexExpr(xml, uint(sigilOffset))
-		if heexExpr == nil {
-			return CursorContext{}
-		}
-
-		if heexExpr.Expr != "" {
-			// Recursively parse interpolated HEEX expressions.
-			// <div class={class()} />
-			//             ^^^^^^^
-			tf := NewTokenizedFile(heexExpr.Expr)
-			line, col := parser.OffsetToLineCol(tf.lineStarts, sigilOffset-int(heexExpr.Offset))
-			ctx := expressionAtCursorImpl(tf.tokens, tf.source, tf.lineStarts, line, col, full)
-
-			if !ctx.Empty() {
-				// We've parsed the expression as though it were its own document,
-				// so we need to offset it's start/end indices to the outer document.
-				nestedOffset := tok.Start + prefixLen + int(heexExpr.Offset) - lineStart
-				ctx.ExprStart += nestedOffset
-				ctx.ExprEnd += nestedOffset
-			}
-
-			return ctx
-		} else {
-			// Heex function components are syntax sugar for module/function expressions.
-			// <Foo.bar />
-			//  ^^^^^^^
-			// <.baz></.baz>
-			//   ^^^
-			exprStart := tok.Start + prefixLen + int(heexExpr.Offset) - lineStart
-			exprEnd := exprStart + len(heexExpr.Module) + len(heexExpr.Function)
-			if heexExpr.Module != "" {
-				// offset by additional 1 for "." dot character between module/function
-				exprEnd += 1
-			}
-
-			return CursorContext{
-				ModuleRef:    heexExpr.Module,
-				FunctionName: heexExpr.Function,
-				ExprStart:    exprStart,
-				ExprEnd:      exprEnd,
-			}
-		}
-	}
-
 	// Reject non-expression tokens (strings, comments, atoms, etc.)
 	if !isExprToken(tok.Kind) {
 		return CursorContext{}
@@ -533,6 +434,11 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 	}
 
 	// Build module ref and function name from the token chain
+	lineStart := 0
+	if line < len(lineStarts) {
+		lineStart = lineStarts[line]
+	}
+
 	var moduleParts []string
 	functionName := ""
 

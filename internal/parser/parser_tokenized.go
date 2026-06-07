@@ -758,27 +758,6 @@ func LineColToOffset(lineStarts []int, line, col int) int {
 	return lineStarts[line] + col
 }
 
-// OffsetToLineCol is the reverse of LineColToOffset. Converts a byte offset
-// to a 0-based (line, col) pair using the LineStarts table from TokenizeFull.
-// Returns (-1, -1) for negative offsets.
-func OffsetToLineCol(lineStarts []int, offset int) (line, col int) {
-	if offset < 0 {
-		return -1, -1
-	}
-
-	var lineStart int
-	for i := range lineStarts {
-		if lineStarts[i] > offset {
-			break
-		}
-
-		lineStart = lineStarts[i]
-		line = i
-	}
-
-	return line, offset - lineStart
-}
-
 // TokenAtOffset returns the index of the token containing byteOffset, or -1
 // if the offset falls in a gap between tokens (whitespace) or is out of range.
 // Uses binary search for O(log n) lookup.

@@ -451,7 +451,8 @@ func TestExpressionAtCursor_HEEX(t *testing.T) {
 		{"~H[<.foo />]", 0, 5, CursorContext{FunctionName: "foo", ExprStart: 5, ExprEnd: 8}},
 		// newline after delimiter is optional
 		{"~H\"\"\"<.foo />\"\"\"", 0, 7, CursorContext{FunctionName: "foo", ExprStart: 7, ExprEnd: 10}},
-		{"~H[<Foo.bar />]", 0, 5, CursorContext{ModuleRef: "Foo", FunctionName: "bar", ExprStart: 4, ExprEnd: 11}},
+		{"~H[<Foo.bar />]", 0, 5, CursorContext{ModuleRef: "Foo", ExprStart: 4, ExprEnd: 7}},
+		{"~H[<Foo.bar />]", 0, 9, CursorContext{ModuleRef: "Foo", FunctionName: "bar", ExprStart: 4, ExprEnd: 11}},
 		{"~H[<.live_component module={Foo.Bar} />]", 0, 28, CursorContext{ModuleRef: "Foo", ExprStart: 28, ExprEnd: 31}},
 		{"~H[<.live_component module={Foo.Bar} />]", 0, 32, CursorContext{ModuleRef: "Foo.Bar", ExprStart: 28, ExprEnd: 35}},
 		{"~H'''\n<.live_component module={Foo.Bar} />\n'''", 1, 29, CursorContext{ModuleRef: "Foo.Bar", ExprStart: 25, ExprEnd: 32}},
