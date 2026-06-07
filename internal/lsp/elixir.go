@@ -362,7 +362,7 @@ func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, p
 		}
 	}
 
-	// check for heredoc and trailing newline, fallback on inline sigil
+	// check for heredoc, fallback on inline sigil
 	quotes := string(source[tok.Start+prefixLen:][:4])
 
 	var delimLen int
@@ -372,8 +372,14 @@ func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, p
 		delimLen = 1
 	}
 
+	// ignore trailing modifier characters
+	end := tok.End
+	for unicode.IsLetter(rune(source[end-1])) {
+		end--
+	}
+
 	start := tok.Start + prefixLen + delimLen
-	end := tok.End - delimLen
+	end -= delimLen
 
 	return source[start:end], string(source[tok.Start:][1:2]), prefixLen + delimLen
 }
