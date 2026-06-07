@@ -124,6 +124,9 @@ func ParseHeexExpr(src []byte, cursorOffset uint) *HeexExpr {
 
 	moduleNode := namedChild(compName, "module")
 	funcNode := namedChild(compName, "function")
+	if funcNode == nil {
+		return nil
+	}
 
 	var module string
 	var offset uint

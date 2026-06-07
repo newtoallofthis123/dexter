@@ -354,7 +354,7 @@ func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, p
 	// > character followed by more uppercase characters and digits.
 	// > https://elixir.hexdocs.pm/sigils.html
 	for {
-		c := rune(source[prefixLen])
+		c := rune(source[tok.Start+prefixLen])
 		if unicode.IsLetter(c) || unicode.IsDigit(c) {
 			prefixLen += 1
 		} else {
@@ -363,7 +363,7 @@ func sigilContents(tok parser.Token, source []byte) (xml []byte, sigil string, p
 	}
 
 	// check for heredoc and trailing newline, fallback on inline sigil
-	quotes := string(source[tok.Start+prefixLen : tok.Start+prefixLen+4])
+	quotes := string(source[tok.Start+prefixLen:][:4])
 
 	var delimLen int
 	if quotes == "\"\"\"" || quotes == "'''" {
@@ -439,7 +439,8 @@ func expressionAtCursorImpl(tokens []parser.Token, source []byte, lineStarts []i
 	// Parse `~H` HEEX sigils
 	if tok.Kind == parser.TokSigil {
 		xml, sigil, prefixLen := sigilContents(tok, source)
-		if sigil != "H" {
+		// ignore non-H sigils and when the cursor is on the sigil character/delimiter
+		if sigil != "H" || offset < tok.Start+prefixLen {
 			return CursorContext{}
 		}
 		sigilOffset := offset - (tok.Start + prefixLen)
