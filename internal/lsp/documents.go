@@ -313,7 +313,7 @@ func (ds *DocumentStore) GetTree(uri string) (*treesitter.Tree, []byte, func(), 
 	}
 	if doc.tree == nil {
 		doc.src = []byte(doc.text)
-		doc.tree = &refTree{tree: treesitter.NewTree(doc.src)}
+		doc.tree = &refTree{tree: treesitter.NewTreeWithParsers(doc.src, ds.parsers)}
 	}
 	rt := doc.tree
 	rt.refs++

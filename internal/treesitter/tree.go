@@ -142,12 +142,8 @@ func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {
 			continue
 		}
 
-		for {
-			// traverse via siblings, if possible
-			if cursor.GotoNextSibling() {
-				break
-			}
-
+		// traverse via siblings, if possible
+		for !cursor.GotoNextSibling() {
 			// move back up and recurse, returning once we're back to the root
 			if !cursor.GotoParent() {
 				return

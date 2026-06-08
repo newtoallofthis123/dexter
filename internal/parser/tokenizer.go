@@ -786,13 +786,19 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 		}
 	}
 
-	if contentsEnd <= contentsStart {
+	// incomplete sigil at end of document
+	if contentsEnd < contentsStart {
 		return i, line
 	}
 
 	// emit tokens if requested
 	if tokens != nil {
-		scanSigilContents(sigilChars, source, start, i, contentsStart, contentsEnd, startLine, lineStarts, tokens)
+		if contentsEnd == contentsStart {
+			// empty sigil
+			*tokens = append(*tokens, Token{Kind: TokSigil, Start: start, End: i, Line: line})
+		} else {
+			scanSigilContents(sigilChars, source, start, i, contentsStart, contentsEnd, startLine, lineStarts, tokens)
+		}
 	}
 
 	return i, line
