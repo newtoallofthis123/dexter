@@ -679,6 +679,9 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 	}
 
 	sigilChars := string(source[start+1 : i])
+	if i == len(source) {
+		return i, line
+	}
 
 	escapes := isLower(sigilLetter) // only lowercase sigils process escapes
 	openCh := source[i]
@@ -783,6 +786,10 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 		}
 	}
 
+	if contentsEnd <= contentsStart {
+		return i, line
+	}
+
 	// emit tokens if requested
 	if tokens != nil {
 		scanSigilContents(sigilChars, source, start, i, contentsStart, contentsEnd, startLine, lineStarts, tokens)
@@ -799,7 +806,7 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 	}
 
 	lineOffset := func(src []byte, offset int) (lines int) {
-		for i := 0; i < offset; i++ {
+		for i := range offset {
 			if src[i] == '\n' {
 				lines++
 			}

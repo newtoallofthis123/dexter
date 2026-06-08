@@ -1,120 +1,10 @@
 package treesitter
 
 import (
-	"log"
 	"strings"
 
-	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
-	tree_sitter_elixir "github.com/tree-sitter/tree-sitter-elixir/bindings/go"
 )
-
-// parseElixir creates a parser, parses src, and returns the root node plus a
-// cleanup function that closes both tree and parser. Used by the standalone
-// (non-cached) entry points. Returns (nil, nil) on failure.
-func parseElixir(src []byte) (root *tree_sitter.Node, cleanup func()) {
-	p := tree_sitter.NewParser()
-	if err := p.SetLanguage(tree_sitter.NewLanguage(tree_sitter_elixir.Language())); err != nil {
-		p.Close()
-		return nil, nil
-	}
-	tree := p.Parse(src, nil)
-	return tree.RootNode(), func() {
-		tree.Close()
-		p.Close()
-	}
-}
-
-// parseElixirExtended is similar to parseElixir but will also parse embedded HEEX templates
-// and make them available in `heex`, keyed by the parent `quoted_contents` node in `root`
-func parseElixirExtended(src []byte) (root *tree_sitter.Node, heex map[*tree_sitter.Node]*tree_sitter.Node, cleanup func()) {
-	root, cleanupElixir := parseElixir(src)
-	if root == nil {
-		return nil, nil, nil
-	}
-
-	var cleanupHeex [](func())
-	heex = make(map[*tree_sitter.Node]*tree_sitter.Node)
-	visitTree(root, func(node *tree_sitter.Node) {
-		if node.Kind() == "quoted_content" &&
-			node.Parent().Kind() == "sigil" &&
-			/* sigil_name */ node.PrevNamedSibling().Utf8Text(src) == "H" {
-			heexRoot, cleanup_ := parseHeex(src[node.StartByte():node.EndByte()])
-			if heexRoot == nil {
-				return
-			}
-
-			heex[node] = heexRoot
-			cleanupHeex = append(cleanupHeex, cleanup_)
-		}
-	})
-
-	return root, heex, func() {
-		for _, c := range cleanupHeex {
-			c()
-		}
-		cleanupElixir()
-	}
-}
-
-// parseHeex parses HEEX present within ~H sigils and in `.heex` files
-func parseHeex(src []byte) (root *tree_sitter.Node, cleanup func()) {
-	p := tree_sitter.NewParser()
-	if err := p.SetLanguage(tree_sitter.NewLanguage(tree_sitter_heex.Language())); err != nil {
-		p.Close()
-		return nil, nil
-	}
-	tree := p.Parse(src, nil)
-	return tree.RootNode(), func() {
-		tree.Close()
-		p.Close()
-	}
-}
-
-// ParseHeex parses the HEEX template in `src` and calls `onNode` for each leaf node
-// it encounters. `onNode` is called with the leaf node's kind, text contents, and
-// offset within the given `src` slice.
-func ParseHeex(src []byte, onNode func(kind, text string, offset int)) {
-	root, cleanup := parseHeex(src)
-	if root == nil {
-		return
-	}
-	defer cleanup()
-
-	visitTree(root, func(node *tree_sitter.Node) {
-		// notify visitor about leaf nodes
-		if node.ChildCount() == 0 {
-			onNode(node.Kind(), node.Utf8Text(src), int(node.StartByte()))
-		}
-	})
-}
-
-func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {
-	cursor := root.Walk()
-	defer cursor.Close()
-
-	for {
-		// visit current node
-		onNode(cursor.Node())
-
-		// traverse down one level, if possible
-		if cursor.GotoFirstChild() {
-			continue
-		}
-
-		for {
-			// traverse via siblings, if possible
-			if cursor.GotoNextSibling() {
-				break
-			}
-
-			// move back up and recurse, returning once we're back to the root
-			if !cursor.GotoParent() {
-				return
-			}
-		}
-	}
-}
 
 // VariableOccurrence is a position where a variable name appears.
 type VariableOccurrence struct {
@@ -127,22 +17,18 @@ type VariableOccurrence struct {
 // occurrences of the variable at the given cursor position within the
 // enclosing function scope. Returns nil if the cursor is not on a variable.
 func FindVariableOccurrences(src []byte, line, col uint) []VariableOccurrence {
-	root, heex, cleanup := parseElixirExtended(src)
-	// FIXME: remove
-	for p, h := range heex {
-		log.Printf("%s\n%s\n", p.Utf8Text(src), h.ToSexp())
-	}
-	if root == nil {
+	tree := NewTree(src)
+	if tree == nil {
 		return nil
 	}
-	defer cleanup()
-	return FindVariableOccurrencesWithTree(root, src, line, col)
+	defer tree.Close()
+	return tree.FindVariableOccurrences(src, line, col)
 }
 
 // FindVariableOccurrencesWithTree is like FindVariableOccurrences but uses a
 // pre-parsed tree root, avoiding redundant parsing when a cached tree exists.
-func FindVariableOccurrencesWithTree(root *tree_sitter.Node, src []byte, line, col uint) []VariableOccurrence {
-	resolved := resolveVariableScope(root, src, line, col)
+func (t *Tree) FindVariableOccurrences(src []byte, line, col uint) []VariableOccurrence {
+	resolved := t.resolveVariableScope(src, line, col)
 	if resolved == nil {
 		return nil
 	}
@@ -190,8 +76,8 @@ func FindVariableOccurrencesWithTree(root *tree_sitter.Node, src []byte, line, c
 //
 // Bare identifiers that are zero-arity function calls (not bound as variables)
 // are NOT considered collisions — in Elixir, a variable simply shadows them.
-func NameExistsInScopeOf(root *tree_sitter.Node, src []byte, line, col uint, newName string) bool {
-	resolved := resolveVariableScope(root, src, line, col)
+func (t *Tree) NameExistsInScopeOf(src []byte, line, col uint, newName string) bool {
+	resolved := t.resolveVariableScope(src, line, col)
 	if resolved == nil {
 		return false
 	}
@@ -210,7 +96,7 @@ func NameExistsInScopeOf(root *tree_sitter.Node, src []byte, line, col uint, new
 	// rather than a bare zero-arity function call. Reuses the full variable
 	// resolution logic so the same scoping rules apply.
 	pos := target.StartPosition()
-	return len(FindVariableOccurrencesWithTree(root, src, uint(pos.Row), uint(pos.Column))) > 0
+	return len(t.FindVariableOccurrences(src, uint(pos.Row), uint(pos.Column))) > 0
 }
 
 // findFirstNonCallIdentifier returns the first identifier node in the subtree
@@ -252,8 +138,8 @@ type resolvedScope struct {
 // resolveVariableScope locates the cursor node at (line, col), validates it as
 // a variable or module attribute, and returns the enclosing scope. Returns nil
 // if the position is not on a renameable variable.
-func resolveVariableScope(root *tree_sitter.Node, src []byte, line, col uint) *resolvedScope {
-	cursorNode := nodeAtPosition(root, line, col)
+func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
+	cursorNode := nodeAtPosition(t.Trunk.RootNode(), line, col)
 	if cursorNode == nil || cursorNode.Kind() != "identifier" {
 		return nil
 	}
@@ -770,19 +656,19 @@ func collectModuleAttributeOccurrences(node *tree_sitter.Node, src []byte, attrN
 // string search, this naturally skips strings, comments, atoms, and other
 // non-code contexts.
 func FindTokenOccurrences(src []byte, token string) []VariableOccurrence {
-	root, cleanup := parseElixir(src)
-	if root == nil {
+	tree := NewTree(src)
+	if tree == nil {
 		return nil
 	}
-	defer cleanup()
-	return FindTokenOccurrencesWithTree(root, src, token)
+	defer tree.Close()
+	return tree.FindTokenOccurrences(src, token)
 }
 
 // FindTokenOccurrencesWithTree is like FindTokenOccurrences but uses a
 // pre-parsed tree root.
-func FindTokenOccurrencesWithTree(root *tree_sitter.Node, src []byte, token string) []VariableOccurrence {
+func (t *Tree) FindTokenOccurrences(src []byte, token string) []VariableOccurrence {
 	var occurrences []VariableOccurrence
-	collectTokenOccurrences(root, src, token, &occurrences)
+	collectTokenOccurrences(t.Trunk.RootNode(), src, token, &occurrences)
 	return occurrences
 }
 
@@ -843,20 +729,20 @@ func collectTokenOccurrences(node *tree_sitter.Node, src []byte, token string, o
 // function scope. Respects clause boundaries: variables from other case/fn
 // clauses are excluded. Returns nil if the cursor is not inside a function.
 func FindVariablesInScope(src []byte, line, col uint) []string {
-	root, cleanup := parseElixir(src)
-	if root == nil {
+	tree := NewTree(src)
+	if tree == nil {
 		return nil
 	}
-	defer cleanup()
-	return FindVariablesInScopeWithTree(root, src, line, col)
+	defer tree.Close()
+	return tree.FindVariablesInScope(src, line, col)
 }
 
 // FindVariablesInScopeWithTree is like FindVariablesInScope but uses a
 // pre-parsed tree root.
-func FindVariablesInScopeWithTree(root *tree_sitter.Node, src []byte, line, col uint) []string {
-	cursorNode := nodeAtPosition(root, line, col)
+func (t *Tree) FindVariablesInScope(src []byte, line, col uint) []string {
+	cursorNode := nodeAtPosition(t.Trunk.RootNode(), line, col)
 	if cursorNode == nil && col > 0 {
-		cursorNode = nodeAtPosition(root, line, col-1)
+		cursorNode = nodeAtPosition(t.Trunk.RootNode(), line, col-1)
 	}
 	if cursorNode == nil {
 		return nil
