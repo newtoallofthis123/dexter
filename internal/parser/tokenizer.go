@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -865,6 +866,287 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 	return start, line
 }
 
+func TokenizeHeex(source []byte) TokenResult {
+	tokens := make([]Token, 0, len(source)/8)
+	lineStarts := make([]int, 1, 64)
+	lineStarts[0] = 0 // line 1 starts at byte 0
+	line := 1
+	i := 0
+
+	matchesSequence := func(src []byte, seq_ string) bool {
+		seq := []byte(seq_)
+		for i, c := range seq {
+			if i >= len(src) || src[i] != c {
+				return false
+			}
+		}
+		return true
+	}
+
+	scanComment := func(delim string, i, line int, lineStarts *[]int) (int, int) {
+		for i < len(source) {
+			if matchesSequence(source[i:], delim) {
+				i += len(delim)
+				break
+			}
+			if source[i] == '\n' {
+				line++
+				*lineStarts = append(*lineStarts, i+1)
+			}
+			i++
+		}
+		return i, line
+	}
+
+	scanInterpolation := func(i, line int, terminator string, lineStarts *[]int, tokens *[]Token) (int, int) {
+		// start := i
+		for i < len(source) {
+			// FIXME: this will get tripped up when the terminator appears within the interpolation
+			// in an ignored context, such as within a string or comment
+			if matchesSequence(source[i:], terminator) {
+				i += len(terminator)
+				break
+			}
+
+			if source[i] == '\n' {
+				*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
+				line++
+				i++
+				*lineStarts = append(*lineStarts, i)
+			}
+		}
+
+		// FIXME: once we've identified the index of the terminator, we know the full range of
+		// the interpolation and may call TokenizeFull on source[start:i] to tokenize the expression
+
+		return i, line
+	}
+
+	scanTagAttr := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+		var quoteChar byte
+		for i < len(source) {
+			ch := source[i]
+
+			switch {
+			case ch == '\n':
+				*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
+				line++
+				i++
+				*lineStarts = append(*lineStarts, i)
+
+			case quoteChar == 0 && isWhitespace(ch):
+				return i, line
+
+			case ch == '\'' || ch == '"':
+				quoteChar = ch
+				i++
+
+			case quoteChar != 0 && ch == '\\':
+				i++
+				if i < len(source) {
+					i++
+				}
+
+			default:
+				i++
+			}
+		}
+
+		return i, line
+	}
+
+	scanTag := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+		hasName := false
+		var tagName strings.Builder
+		var tagNameTokens []Token
+		for i < len(source) {
+			switch {
+			case source[i] == '\n':
+				*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
+				line++
+				i++
+				*lineStarts = append(*lineStarts, i)
+
+			case isWhitespace(source[i]):
+				i++
+
+			// <.foo
+			case source[i] == '.':
+				dotTkn := Token{Kind: TokDot, Start: i, End: i + 1, Line: line}
+				*tokens = append(*tokens, dotTkn)
+				i++
+
+				start := i
+				for i < len(source) && (isLetter(source[i]) || isDigit(source[i])) {
+					i++
+				}
+				if i == start {
+					break
+				}
+
+				var tknKind TokenKind
+				if isUpper(source[start]) {
+					tknKind = TokModule
+				} else {
+					tknKind = TokIdent
+					hasName = true
+				}
+				nameTkn := Token{Kind: tknKind, Start: start, End: i, Line: line}
+				*tokens = append(*tokens, nameTkn)
+				tagName.WriteByte('.')
+				tagName.Write(source[start:i])
+				tagNameTokens = append(tagNameTokens, dotTkn, nameTkn)
+
+			// <div OR <Foo.bar
+			case !hasName && isLetter(source[i]):
+				start := i
+				for i < len(source) && (isLetter(source[i]) || isDigit(source[i])) {
+					i++
+				}
+
+				var modTkn Token
+				if i < len(source) && isUpper(source[start]) && source[i] == '.' {
+					// if this is a module name, keep looking for addn'l modules or function in chain
+					modTkn = Token{Kind: TokModule, Start: start, End: i, Line: line}
+					*tokens = append(*tokens, modTkn)
+					tagNameTokens = append(tagNameTokens, modTkn)
+				} else {
+					// otherwise, this is a HTML tag name
+					hasName = true
+				}
+
+				tagName.Write(source[start:i])
+
+			// attribute
+			case isLetter(source[i]):
+				i, line = scanTagAttr(i, line, lineStarts, tokens)
+
+			// HEEX special attribute ":if={}", ":for={}", ":let={}"
+			case source[i] == ':':
+				if i+1 >= len(source) {
+					break
+				}
+				if matchesSequence(source[i+1:], "if={") {
+					i += 4
+					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
+				} else if matchesSequence(source[i+1:], "for={") {
+					i += 5
+					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
+				} else if matchesSequence(source[i+1:], "let={") {
+					i += 5
+					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
+				} else {
+					i, line = scanTagAttr(i, line, lineStarts, tokens)
+				}
+
+			// self-closing tag
+			case source[i] == '/':
+				if i+1 < len(source) && source[i+1] == '>' {
+					i += 2
+					return i, line
+				}
+
+			// finish open tag
+			case source[i] == '>':
+				for i < len(source) {
+					closeTag := "</" + tagName.String() + ">"
+					if matchesSequence(source[i:], closeTag) {
+						// consume </
+						i += 2
+						var offset int
+						for j, t := range tagNameTokens {
+							// on first token, calculate offset from open tag and shift
+							// all subsequent token start/end offsets by the same amount
+							if j == 0 {
+								offset = i - t.Start
+							}
+							*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + offset, End: t.End + offset, Line: line})
+						}
+						i += len(closeTag) - 2
+						break
+					}
+					if source[i] == '\n' {
+						*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
+						line++
+						i++
+						*lineStarts = append(*lineStarts, i)
+					}
+					i++
+				}
+
+			default:
+				i++
+			}
+		}
+
+		return i, line
+	}
+
+	for i < len(source) {
+		ch := source[i]
+
+		// Whitespace, newlines, and comments don't affect afterDot — they preserve it.
+		// Everything else clears it (except the dot case which sets it).
+		switch {
+		case ch == '\n':
+			tokens = append(tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
+			line++
+			i++
+			lineStarts = append(lineStarts, i)
+
+		case isWhitespace(ch):
+			i++
+
+		case ch == '<':
+			// consume <
+			i++
+			if i < len(source) {
+				if source[i] == '!' && i+2 < len(source) && source[i+1] == '-' && source[i+2] == '-' {
+					// HTML comment "<!--"
+					i += 3
+					start := i - 4
+					startLine := line
+					i, line = scanComment("-->", i, line, &lineStarts)
+					tokens = append(tokens, Token{Kind: TokComment, Start: start, End: i, Line: startLine})
+				} else if source[i] == '%' {
+					// consume %
+					i++
+					if source[i] == '!' && i+2 < len(source) && source[i+1] == '-' && source[i+2] == '-' {
+						// HEEX comment "<%!--"
+						i += 3
+						start := i - 5
+						startLine := line
+						i, line = scanComment("--%>", i, line, &lineStarts)
+						tokens = append(tokens, Token{Kind: TokComment, Start: start, End: i, Line: startLine})
+					} else {
+						// EEX interpolation "<%"
+						// EEX special form "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end", "<% _ ->"
+						i, line = scanInterpolation(i, line, "%>", &lineStarts, &tokens)
+					}
+				} else {
+					// HTML tag "<div"
+					// HEEX component "<.foo", "<Foo.bar"
+					i, line = scanTag(i, line, &lineStarts, &tokens)
+				}
+			}
+
+		case ch == '{':
+			// HEEX interpolation "{"
+			i++
+			i, line = scanInterpolation(i, line, "}", &lineStarts, &tokens)
+
+		default:
+			i++
+		}
+	}
+
+	tokens = append(tokens, Token{Kind: TokEOF, Start: len(source), End: len(source), Line: line})
+	return TokenResult{
+		Tokens:     tokens,
+		LineStarts: lineStarts,
+	}
+}
+
 // scanRawHeredocContent scans a heredoc body where backslash is NOT an escape character
 // (used by uppercase sigils like ~S"""). Only tracks newlines and looks for closing delimiter.
 func scanRawHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int) (int, int) {
@@ -907,6 +1189,11 @@ func isUpper(ch byte) bool {
 // isDigit returns true for [0-9].
 func isDigit(ch byte) bool {
 	return ch >= '0' && ch <= '9'
+}
+
+// isWhitespace returns true for space, tab, and carriage return.
+func isWhitespace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\r'
 }
 
 // isHexDigit returns true for [0-9a-fA-F].

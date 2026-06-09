@@ -115,13 +115,9 @@ func (s *Server) debugNow() time.Time {
 }
 
 func NewServer(s *store.Store, projectRoot string) *Server {
-	docs := NewDocumentStore()
-	if docs == nil {
-		return nil
-	}
 	return &Server{
 		store:              s,
-		docs:               docs,
+		docs:               NewDocumentStore(),
 		projectRoot:        projectRoot,
 		explicitRoot:       projectRoot != "",
 		followDelegates:    true,
@@ -142,9 +138,6 @@ func (s stdinoutCloser) Close() error { return nil }
 // Serve starts the LSP server on the given reader/writer (typically stdin/stdout).
 func Serve(in io.Reader, out io.Writer, s *store.Store, projectRoot string) error {
 	server := NewServer(s, projectRoot)
-	if server == nil {
-		return nil
-	}
 
 	logger, _ := zap.NewProduction()
 	stream := jsonrpc2.NewStream(stdinoutCloser{in, out})

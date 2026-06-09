@@ -2077,9 +2077,8 @@ func TestTokenize_EscapedNewlineLineTracking(t *testing.T) {
 }
 
 func TestLineStartsAccuracy(t *testing.T) {
-	assertLineStarts := func(t *testing.T, src string) {
+	assertLineStarts := func(t *testing.T, src string, result TokenResult) {
 		t.Helper()
-		result := TokenizeFull([]byte(src))
 		lineStarts := result.LineStarts
 		lines := strings.Split(src, "\n")
 		if len(lineStarts) != len(lines) {
@@ -2100,9 +2099,8 @@ func TestLineStartsAccuracy(t *testing.T) {
 		}
 	}
 
-	assertTokenAt := func(t *testing.T, src string, line0, col int, wantKind TokenKind, wantText string) {
+	assertTokenAt := func(t *testing.T, src string, result TokenResult, line0, col int, wantKind TokenKind, wantText string) {
 		t.Helper()
-		result := TokenizeFull([]byte(src))
 		offset := LineColToOffset(result.LineStarts, line0, col)
 		idx := TokenAtOffset(result.Tokens, offset)
 		if idx < 0 {
@@ -2119,25 +2117,42 @@ func TestLineStartsAccuracy(t *testing.T) {
 
 	t.Run("heredoc", func(t *testing.T) {
 		src := "defmodule MyApp.Example do\n  @moduledoc \"\"\"\n  This is a long\n  multiline heredoc\n  with several lines\n  of documentation.\n  \"\"\"\n\n  @type t :: %__MODULE__{\n          name: String.t(),\n          age: Integer.t()\n        }\n\n  def hello do\n    :world\n  end\nend"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 9, 16, TokModule, "String")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 9, 16, TokModule, "String")
 	})
 
 	t.Run("multiline string", func(t *testing.T) {
 		src := "x = \"line one\nline two\nline three\"\ny = Enum.map(list, fn x -> x end)"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 3, 4, TokModule, "Enum")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 3, 4, TokModule, "Enum")
 	})
 
 	t.Run("sigil heredoc", func(t *testing.T) {
 		src := "x = ~s\"\"\"\nline one\nline two\n\"\"\"\ny = MyModule.func()"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 4, 4, TokModule, "MyModule")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 4, 4, TokModule, "MyModule")
 	})
 
 	t.Run("multiline interpolation", func(t *testing.T) {
 		src := "x = \"hello #{\n  some_func()\n}\"\ny = String.trim(x)"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 3, 4, TokModule, "String")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 3, 4, TokModule, "String")
 	})
+
+	t.Run("HEEX: comment", func(t *testing.T) {
+		src := "<!-- hello,\nworld! -->"
+		result := TokenizeHeex([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 0, 0, TokComment, "<!-- hello,\nworld! -->")
+	})
+}
+
+func TestTokenizeHeex(t *testing.T) {
+	src := "<%!-- hello, world! --%>foo\nbar"
+	result := TokenizeHeex([]byte(src))
+	fmt.Printf("%+v %s\n", result, TokenText([]byte(src), result.Tokens[0]))
 }

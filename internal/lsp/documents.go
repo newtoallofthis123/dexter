@@ -89,13 +89,9 @@ type DocumentStore struct {
 }
 
 func NewDocumentStore() *DocumentStore {
-	parsers := treesitter.AllParsers()
-	if parsers == nil {
-		return nil
-	}
 	return &DocumentStore{
 		docs:          make(map[string]*cachedDoc),
-		parsers:       parsers,
+		parsers:       treesitter.AllParsers(),
 		transientList: list.New(),
 		transientIdx:  make(map[string]*list.Element),
 		maxTransient:  defaultMaxTransient,
