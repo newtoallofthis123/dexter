@@ -937,7 +937,7 @@ func TokenizeHeex(source []byte) TokenResult {
 			case quoteChar == 0 && isWhitespace(ch):
 				return i, line
 
-			case ch == '\'' || ch == '"':
+			case quoteChar == 0 && ch == '\'' || ch == '"':
 				quoteChar = ch
 				i++
 
@@ -946,6 +946,9 @@ func TokenizeHeex(source []byte) TokenResult {
 				if i < len(source) {
 					i++
 				}
+
+			case ch == '{':
+				return scanInterpolation(i, line, "}", lineStarts, tokens)
 
 			default:
 				i++
