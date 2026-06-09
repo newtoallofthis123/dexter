@@ -97,36 +97,16 @@ func AllParsers() map[Language]*tree_sitter.Parser {
 	for _, l := range []Language{LangElixir, LangHeex} {
 		p := NewParser(l)
 		if p == nil {
+			// if a parser fails to initialize, close any already-opened parsers
+			for _, pp := range parsers {
+				pp.Close()
+			}
 			return nil
 		}
 		parsers[l] = p
 	}
 
 	return parsers
-}
-
-// ParseHeex parses the HEEX template in `src` and calls `onNode` for each leaf node
-// it encounters. `onNode` is called with the leaf node's kind, text contents, and
-// offset within the given `src` slice.
-func ParseHeex(src []byte, onNode func(kind, text string, offset int)) {
-	p := NewParser(LangHeex)
-	if p == nil {
-		return
-	}
-	defer p.Close()
-
-	tree := p.Parse(src, nil)
-	if tree == nil {
-		return
-	}
-	defer tree.Close()
-
-	visitTree(tree.RootNode(), func(node *tree_sitter.Node) {
-		// notify visitor about leaf nodes
-		if node.ChildCount() == 0 {
-			onNode(node.Kind(), node.Utf8Text(src), int(node.StartByte()))
-		}
-	})
 }
 
 func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {

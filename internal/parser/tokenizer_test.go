@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 // tokenizeNoEOF runs Tokenize and strips the trailing TokEOF for cleaner assertions.
@@ -2152,7 +2154,57 @@ func TestLineStartsAccuracy(t *testing.T) {
 }
 
 func TestTokenizeHeex(t *testing.T) {
-	src := "<%!-- hello, world! --%>foo\nbar"
-	result := TokenizeHeex([]byte(src))
-	fmt.Printf("%+v %s\n", result, TokenText([]byte(src), result.Tokens[0]))
+	tests := []struct {
+		src, want string
+	}{
+		{"<%!-- hello, world! --%>",
+			`TokComment (0:24) "<%!-- hello, world! --%>"
+TokEOF (24:24)
+`},
+		{"<div>hello!</div>", `TokEOF (17:17)
+`},
+		{"<.foo></.foo>", `TokDot (1:2)
+TokIdent (2:5) "foo"
+TokDot (8:9)
+TokIdent (9:12) "foo"
+TokEOF (13:13)
+`},
+		{"<.foo />", `TokDot (1:2)
+TokIdent (2:5) "foo"
+TokEOF (8:8)
+`},
+		{"<.live_component id=\"foo\" module={Foo.Bar} />", `TokDot (1:2)
+TokIdent (2:6) "live"
+TokModule (34:37) "Foo"
+TokDot (37:38)
+TokModule (38:41) "Bar"
+TokEOF (45:45)
+`},
+		{`<div class="bg-base-200 p-8">
+			<%!-- Header --%>`, ""},
+	}
+
+	for _, tt := range tests {
+		result := TokenizeHeex([]byte(tt.src))
+		got := DebugTokens([]byte(tt.src), result.Tokens)
+		if diff := cmp.Diff(tt.want, got); diff != "" {
+			t.Errorf("TokenizeHeex(src)  (-want +got)\n\n%s\n\n%s", tt.src, diff)
+		}
+	}
+}
+
+func DebugTokens(source []byte, tokens []Token) string {
+	var s strings.Builder
+
+	for _, t := range tokens {
+		switch t.Kind {
+		case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
+			fmt.Fprintf(&s, "%s (%d:%d)\n", t.Kind.String(), t.Start, t.End)
+
+		default:
+			fmt.Fprintf(&s, "%s (%d:%d) %#v\n", t.Kind.String(), t.Start, t.End, TokenText(source, t))
+		}
+	}
+
+	return s.String()
 }
