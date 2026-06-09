@@ -1114,7 +1114,7 @@ func TokenizeHeex(source []byte) TokenResult {
 				} else if source[i] == '%' {
 					// consume %
 					i++
-					if source[i] == '!' && i+2 < len(source) && source[i+1] == '-' && source[i+2] == '-' {
+					if i+2 < len(source) && source[i] == '!' && source[i+1] == '-' && source[i+2] == '-' {
 						// HEEX comment "<%!--"
 						i += 3
 						start := i - 5
