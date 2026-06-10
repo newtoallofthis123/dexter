@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"unicode"
@@ -135,6 +136,14 @@ func Tokenize(source []byte) []Token {
 }
 
 func TokenizeFull(source []byte) TokenResult {
+	_, _, result := tokenizeUntil(source, nil)
+	return result
+}
+
+// tokenizeUntil tokenizes the given source until the given terminator is reached
+// in a non-ignored context (ignored when it appears within a comment or string literal).
+// Returns the byte offset and line number that tokenizing stopped along with the token result.
+func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
 	tokens := make([]Token, 0, len(source)/8)
 	lineStarts := make([]int, 1, 64)
 	lineStarts[0] = 0 // line 1 starts at byte 0
@@ -148,6 +157,9 @@ func TokenizeFull(source []byte) TokenResult {
 		// Whitespace, newlines, and comments don't affect afterDot — they preserve it.
 		// Everything else clears it (except the dot case which sets it).
 		switch {
+		case terminator != nil && bytes.HasPrefix(source[i:], terminator):
+			return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
+
 		case ch == '\n':
 			tokens = append(tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
 			line++
@@ -542,7 +554,7 @@ func TokenizeFull(source []byte) TokenResult {
 	}
 
 	tokens = append(tokens, Token{Kind: TokEOF, Start: len(source), End: len(source), Line: line})
-	return TokenResult{Tokens: tokens, LineStarts: lineStarts}
+	return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
 }
 
 // scanStringContent scans from after the opening delimiter to (and including) the matching closing delimiter.
@@ -831,19 +843,9 @@ func TokenizeHeex(source []byte) TokenResult {
 	line := 1
 	i := 0
 
-	matchesSequence := func(src []byte, seq_ string) bool {
-		seq := []byte(seq_)
-		for i, c := range seq {
-			if i >= len(src) || src[i] != c {
-				return false
-			}
-		}
-		return true
-	}
-
 	scanComment := func(delim string, i, line int, lineStarts *[]int) (int, int) {
 		for i < len(source) {
-			if matchesSequence(source[i:], delim) {
+			if bytes.HasPrefix(source[i:], []byte(delim)) {
 				i += len(delim)
 				break
 			}
@@ -856,88 +858,25 @@ func TokenizeHeex(source []byte) TokenResult {
 		return i, line
 	}
 
-	scanUntil := func(i, line int, terminator string, lineStarts *[]int, tokens *[]Token) (int, int) {
-		for i < len(source) {
-			// FIXME: this will get tripped up when the terminator appears within the interpolation
-			// in an ignored context, such as within a string or comment
-			if matchesSequence(source[i:], terminator) {
-				break
-			}
-
-			if source[i] == '\n' {
-				*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
-				line++
-				i++
-				*lineStarts = append(*lineStarts, i)
-			} else {
-				i++
-			}
-		}
-
-		return i, line
-	}
-
-	scanInterpolation := func(i, line int, terminator string, lineStarts *[]int, tokens *[]Token) (int, int) {
+	scanInterpolation := func(i, line int, terminator string, tokens *[]Token) (int, int) {
 		start := i
 		startLine := line
 
-		// FIXME: this will get tripped up when the terminator appears within the interpolation
-		// in an ignored context, such as within a string or comment
-		i, line = scanUntil(i, line, terminator, lineStarts, tokens)
-
-		result := TokenizeFull(source[start:i])
+		// lineStarts has already been updated during heredoc scanning
+		i_, line_, result := tokenizeUntil(source[start:], []byte(terminator))
 		for _, t := range result.Tokens {
 			if t.Kind != TokEOF {
 				*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
 			}
 		}
-		for _, ls := range result.LineStarts[1:] {
-			*lineStarts = append(*lineStarts, ls+start)
-		}
 
-		i += len(terminator)
+		i += i_ + len(terminator)
+		line += line_ - 1
 
 		return i, line
 	}
 
-	scanSpecialForm := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
-		for i < len(source) {
-			switch {
-			case source[i] == '\n':
-				*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
-				line++
-				i++
-				*lineStarts = append(*lineStarts, i)
-
-			case isWhitespace(source[i]):
-				i++
-
-			// FIXME: these forms may introduce variables bindings, so we can't just ignore their contents
-			// "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end"
-			case matchesSequence(source[i:], "for") ||
-				matchesSequence(source[i:], "if") ||
-				matchesSequence(source[i:], "else") ||
-				matchesSequence(source[i:], "case") ||
-				matchesSequence(source[i:], "cond") ||
-				matchesSequence(source[i:], "end"):
-				i, line = scanUntil(i, line, "%>", lineStarts, tokens)
-				// consume %>
-				i += 2
-				return i, line
-
-			// FIXME: `<% {pattern} -> %>` from case/cond special forms affect scope resolution
-			// and probably don't tokenize correctly with `scanInterpolation` since they aren't
-			// complete expressions on their own
-
-			default:
-				return scanInterpolation(i, line, "%>", lineStarts, tokens)
-			}
-		}
-
-		return i, line
-	}
-
-	scanTagName := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+	scanTagName := func(i, line int, tokens *[]Token) (int, int) {
 		for i < len(source) {
 			switch {
 			// <.foo
@@ -1013,7 +952,7 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			case ch == '{':
 				i++
-				return scanInterpolation(i, line, "}", lineStarts, tokens)
+				return scanInterpolation(i, line, "}", tokens)
 
 			case ch == '>':
 				return i, line
@@ -1041,7 +980,7 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			// HTML tag name, function, or module/function
 			case !hasName:
-				i, line = scanTagName(i, line, lineStarts, tokens)
+				i, line = scanTagName(i, line, tokens)
 				hasName = true
 
 			// attribute
@@ -1076,8 +1015,6 @@ func TokenizeHeex(source []byte) TokenResult {
 	for i < len(source) {
 		ch := source[i]
 
-		// Whitespace, newlines, and comments don't affect afterDot — they preserve it.
-		// Everything else clears it (except the dot case which sets it).
 		switch {
 		case ch == '\n':
 			tokens = append(tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
@@ -1116,11 +1053,11 @@ func TokenizeHeex(source []byte) TokenResult {
 						}
 						// EEX interpolation "<%"
 						// EEX special form "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end", "<% _ ->"
-						i, line = scanSpecialForm(i, line, &lineStarts, &tokens)
+						i, line = scanInterpolation(i, line, "%>", &tokens)
 					}
 				} else if source[i] == '/' {
 					i++
-					i, line = scanTagName(i, line, &lineStarts, &tokens)
+					i, line = scanTagName(i, line, &tokens)
 					if i < len(source) && source[i] == '>' {
 						i++
 					}
@@ -1134,7 +1071,7 @@ func TokenizeHeex(source []byte) TokenResult {
 		case ch == '{':
 			// HEEX interpolation "{"
 			i++
-			i, line = scanInterpolation(i, line, "}", &lineStarts, &tokens)
+			i, line = scanInterpolation(i, line, "}", &tokens)
 
 		default:
 			i++
