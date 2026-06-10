@@ -2192,7 +2192,7 @@ TokEOF (54:54)
 	}
 
 	for _, tt := range tests {
-		err := withTimeout(200_000_000_000, func() {
+		err := withTimeout(2_000, func() {
 			result := TokenizeHeex([]byte(tt.src))
 			got := DebugTokens([]byte(tt.src), result.Tokens)
 			if diff := cmp.Diff(tt.want, got); diff != "" {

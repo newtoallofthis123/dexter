@@ -50,8 +50,8 @@ func NewTreeWithParsers(src []byte, parsers map[Language]*tree_sitter.Parser) *T
 	heex := make(map[*tree_sitter.Node]*tree_sitter.Tree)
 	visitTree(trunk.RootNode(), func(node *tree_sitter.Node) {
 		if node.Kind() == "quoted_content" &&
-			node.Parent().Kind() == "sigil" &&
-			/* sigil_name */ node.PrevNamedSibling().Utf8Text(src) == "H" {
+			node.Parent() != nil && node.Parent().Kind() == "sigil" &&
+			/* sigil_name */ node.PrevNamedSibling() != nil && node.PrevNamedSibling().Utf8Text(src) == "H" {
 			tree := parsers[LangHeex].Parse(src[node.StartByte():node.EndByte()], nil)
 			if tree == nil {
 				return
