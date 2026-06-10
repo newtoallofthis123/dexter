@@ -141,9 +141,8 @@ type resolvedScope struct {
 // if the position is not on a renameable variable.
 func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
 	cursorNode := t.nodeAtPosition(t.Trunk.RootNode(), line, col)
-	log.Printf("cursorNode(%d, %d): [%d:%d] [%d:%d]\n%s\n%s\n",
-		line, col, cursorNode.node.StartByte(), cursorNode.node.EndByte(),
-		cursorNode.node.StartByte(), cursorNode.node.EndByte(), cursorNode.utf8Text(src), src)
+	log.Printf("cursorNode(%d, %d): [%d:%d]\n%s\n",
+		line, col, cursorNode.node.StartByte(), cursorNode.node.EndByte(), cursorNode.utf8Text(src))
 
 	if cursorNode == nil || cursorNode.node.Kind() != "identifier" {
 		return nil
@@ -173,7 +172,7 @@ func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
 
 	// Find the enclosing scope: a stab_clause that binds this variable, or
 	// the enclosing def/defp/defmacro/test call.
-	scope := findEnclosingScope(cursorNode_, src, varName)
+	scope := findEnclosingScope(cursorNode, src, varName)
 	if scope == nil {
 		return nil
 	}
@@ -184,11 +183,11 @@ func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
 	// This ensures bare function calls fall through to function reference lookup.
 	// Exception: if the cursor is on an assignment target (LHS of =), it is
 	// unambiguously a variable binding regardless of other occurrences.
-	if !isAssignmentTarget(cursorNode_, src) && !variableDefinedInScope(scope, src, varName, line, col) {
+	if !isAssignmentTarget(cursorNode, src) && !variableDefinedInScope(scope, src, varName, line, col) {
 		return nil
 	}
 
-	return &resolvedScope{cursorNode: cursorNode_, scope: scope, varName: varName}
+	return &resolvedScope{cursorNode: cursorNode_, scope: scope.node, varName: varName}
 }
 
 // moduleAttributeExists returns true if @name appears in the subtree.
@@ -211,23 +210,45 @@ func moduleAttributeExists(node *tree_sitter.Node, src []byte, name string) bool
 // within a sub-tree. For trunk nodes, parentTree will be nil. For sub-tree nodes,
 // parentTree will point to the trunk node that contains the resolved node.
 type resolvedNode struct {
-	node   *tree_sitter.Node
-	parent *resolvedNode
+	node       *tree_sitter.Node
+	parentNode *resolvedNode
 }
 
 // FIXME: remove once all resolvedNode usage respects sub-trees
 func (rn *resolvedNode) trunkNode() *tree_sitter.Node {
-	if rn.parent == nil {
+	if rn.parentNode == nil {
 		return rn.node
 	}
-	return rn.parent.trunkNode()
+	return rn.parentNode.trunkNode()
+}
+
+// parent moves up to the resolved node's nearest parent in the same tree.
+// If the node has no parent, moves to the parent tree node instead.
+func (rn *resolvedNode) parent() *resolvedNode {
+	if parent := rn.node.Parent(); parent != nil {
+		return &resolvedNode{parentNode: rn.parentNode, node: parent}
+	}
+	return rn.parentNode
+}
+
+func (rn *resolvedNode) startPosition() tree_sitter.Point {
+	if rn.parentNode == nil {
+		return rn.node.StartPosition()
+	}
+	p := rn.parentNode.startPosition()
+	p.Row += rn.node.StartPosition().Row
+	return p
+}
+
+func (rn *resolvedNode) child(i uint) *resolvedNode {
+	return &resolvedNode{parentNode: rn.parentNode, node: rn.node.Child(i)}
 }
 
 func (rn *resolvedNode) utf8Text(src []byte) string {
-	if rn.parent == nil {
+	if rn.parentNode == nil {
 		return rn.node.Utf8Text(src)
 	}
-	return rn.parent.utf8Text(src)[rn.node.StartByte():rn.node.EndByte()]
+	return rn.parentNode.utf8Text(src)[rn.node.StartByte():rn.node.EndByte()]
 }
 
 // nodeAtPosition finds the deepest (most specific) node at the given position.
@@ -244,11 +265,11 @@ func (t *Tree) nodeAtPositionInParent(parent *resolvedNode, node *tree_sitter.No
 	// Try to find a child within a sub-tree
 	if branch := t.Branches[node.Id()]; branch != nil {
 		log.Printf("submerging from %d", node.Id())
-		parent = &resolvedNode{node: node, parent: parent}
+		parent = &resolvedNode{node: node, parentNode: parent}
 		if resolved := branch.nodeAtPositionInParent(parent, branch.Trunk.RootNode(), line-node.StartPosition().Row, col); resolved != nil {
 			return resolved
 		}
-		return &resolvedNode{node: node, parent: parent}
+		return &resolvedNode{node: node, parentNode: parent}
 	}
 
 	// Try to find a more specific child
@@ -259,7 +280,7 @@ func (t *Tree) nodeAtPositionInParent(parent *resolvedNode, node *tree_sitter.No
 		}
 	}
 
-	return &resolvedNode{node: node, parent: parent}
+	return &resolvedNode{node: node, parentNode: parent}
 }
 
 // isFunctionNameInCall returns true if the identifier is the function name
@@ -358,16 +379,16 @@ func definesNestedScope(node *tree_sitter.Node, src []byte) bool {
 
 // isAssignmentTarget returns true if node is on the left-hand side of a `=`
 // binary operator, meaning it is unambiguously a variable binding.
-func isAssignmentTarget(node *tree_sitter.Node, src []byte) bool {
-	parent := node.Parent()
-	if parent == nil || parent.Kind() != "binary_operator" || parent.ChildCount() < 3 {
+func isAssignmentTarget(node *resolvedNode, src []byte) bool {
+	parent := node.parent()
+	if parent == nil || parent.node.Kind() != "binary_operator" || parent.node.ChildCount() < 3 {
 		return false
 	}
-	if parent.Child(1).Utf8Text(src) != "=" {
+	if parent.node.Child(1).Utf8Text(src) != "=" {
 		return false
 	}
-	left := parent.Child(0)
-	return node.StartByte() >= left.StartByte() && node.EndByte() <= left.EndByte()
+	left := parent.node.Child(0)
+	return node.node.StartByte() >= left.StartByte() && node.node.EndByte() <= left.EndByte()
 }
 
 // variableDefinedInScope returns true if varName is bound (defined) in the
@@ -375,7 +396,7 @@ func isAssignmentTarget(node *tree_sitter.Node, src []byte) bool {
 // at a position other than the cursor. A bare identifier that only appears
 // at the cursor position is ambiguous (could be a zero-arity function call)
 // and should not be treated as a variable.
-func variableDefinedInScope(scope *tree_sitter.Node, src []byte, varName string, cursorLine, cursorCol uint) bool {
+func variableDefinedInScope(scope *resolvedNode, src []byte, varName string, cursorLine, cursorCol uint) bool {
 	return identifierExistsElsewhere(scope, src, varName, cursorLine, cursorCol, true)
 }
 
@@ -386,21 +407,21 @@ func variableDefinedInScope(scope *tree_sitter.Node, src []byte, varName string,
 // the chosen scope itself, which may be such a def call) — otherwise a bare
 // top-level call sharing a name with a function-local would be misread as a
 // variable.
-func identifierExistsElsewhere(node *tree_sitter.Node, src []byte, name string, line, col uint, isRoot bool) bool {
+func identifierExistsElsewhere(node *resolvedNode, src []byte, name string, line, col uint, isRoot bool) bool {
 	if node == nil {
 		return false
 	}
 	if !isRoot && definesNestedScope(node, src) {
 		return false
 	}
-	if node.Kind() == "identifier" && node.Utf8Text(src) == name && !isFunctionNameInCall(node, src) {
-		pos := node.StartPosition()
+	if node.node.Kind() == "identifier" && node.utf8Text(src) == name && !isFunctionNameInCall(node, src) {
+		pos := node.startPosition()
 		if uint(pos.Row) != line || uint(pos.Column) != col {
 			return true
 		}
 	}
-	for i := uint(0); i < uint(node.ChildCount()); i++ {
-		if identifierExistsElsewhere(node.Child(i), src, name, line, col, false) {
+	for i := uint(0); i < uint(node.node.ChildCount()); i++ {
+		if identifierExistsElsewhere(node.child(i), src, name, line, col, false) {
 			return true
 		}
 	}
@@ -415,12 +436,12 @@ func identifierExistsElsewhere(node *tree_sitter.Node, src []byte, name string, 
 // boundary ONLY when the cursor is inside the do_block — not when it's on the
 // right side of a <- clause, which is evaluated in the outer scope.
 // Otherwise, the enclosing def/defp/defmacro/test call is the scope.
-func findEnclosingScope(node *tree_sitter.Node, src []byte, varName string) *tree_sitter.Node {
+func findEnclosingScope(node *resolvedNode, src []byte, varName string) *resolvedNode {
 	prev := node
-	current := node.Parent()
+	current := node.parent()
 	for current != nil {
-		if current.Kind() == "stab_clause" {
-			if stabBindsVariable(current, src, varName) {
+		if current.node.Kind() == "stab_clause" {
+			if stabBindsVariable(current.node, src, varName) {
 				return current
 			}
 			// Body rebinds the variable (e.g. `fn ^x -> x = nil end`): the
@@ -428,12 +449,12 @@ func findEnclosingScope(node *tree_sitter.Node, src []byte, varName string) *tre
 			// Note: if the cursor is on a closure reference BEFORE the rebind
 			// in the same body, it will be scoped to the fn rather than the
 			// outer function. This is an acceptable limitation for a rare pattern.
-			if stabBodyRebindsVariable(current, src, varName) {
+			if stabBodyRebindsVariable(current.node, src, varName) {
 				return current
 			}
 		}
-		if current.Kind() == "call" && current.ChildCount() > 0 {
-			firstChild := current.Child(0)
+		if current.node.Kind() == "call" && current.node.ChildCount() > 0 {
+			firstChild := current.node.Child(0)
 			if firstChild.Kind() == "identifier" && functionKeywords[firstChild.Utf8Text(src)] {
 				return current
 			}
@@ -444,8 +465,8 @@ func findEnclosingScope(node *tree_sitter.Node, src []byte, varName string) *tre
 				return current
 			}
 			// with/for/etc.: scope boundary unless cursor is on clause 0's rhs (outer scope).
-			if callHasDoBlock(current) && callArgumentPatternsBindVariable(current, src, varName) {
-				if cursorNeedsWithScope(current, prev, node, src, varName) {
+			if callHasDoBlock(current.node) && callArgumentPatternsBindVariable(current.node, src, varName) {
+				if cursorNeedsWithScope(current.node, prev.node, node.node, src, varName) {
 					return current
 				}
 			}
@@ -456,7 +477,7 @@ func findEnclosingScope(node *tree_sitter.Node, src []byte, varName string) *tre
 			return current
 		}
 		prev = current
-		current = current.Parent()
+		current = current.parent()
 	}
 	return nil
 }
