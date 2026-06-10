@@ -1,6 +1,7 @@
 package treesitter
 
 import (
+	"log"
 	"unsafe"
 
 	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
@@ -8,20 +9,24 @@ import (
 	tree_sitter_elixir "github.com/tree-sitter/tree-sitter-elixir/bindings/go"
 )
 
-// Tree contains an Elixir document tree and a map of any HEEX sub-trees.
-// Heex is a map of `quoted_content` nodes within sigils in the document
-// tree to their corresponding HEEX sub-tree.
+// Tree contains a document trunk tree and a map of any branch sub-trees.
+// For Elixir trunks, Branches is a map of `quoted_content` node IDs within sigils
+// in the document tree to their corresponding HEEX sub-tree. For HEEX trunks,
+// Branches is a map of `expression_value` node IDs within interpolated expressions
+// in the document tree to their corresponding Elixir sub-tree. Sub-trees may
+// be nested arbitrarily deep, though in practice it will typically be 1-3 levels.
 //
-// (sigil (sigil_name) node: (quoted_content))
+// Elixir->HEEX: (sigil (sigil_name) node: (quoted_content))
+// HEEX->Elixir: (expression node: (expression_value))
 type Tree struct {
-	Trunk *tree_sitter.Tree
-	Heex  map[*tree_sitter.Node]*tree_sitter.Tree
+	Trunk    *tree_sitter.Tree
+	Branches map[uintptr]*Tree
 }
 
 // Close closes the trunk tree and any HEEX sub-trees.
 func (t *Tree) Close() {
-	for _, ht := range t.Heex {
-		ht.Close()
+	for _, b := range t.Branches {
+		b.Close()
 	}
 	t.Trunk.Close()
 }
@@ -42,28 +47,40 @@ func NewTree(src []byte) *Tree {
 // NewTreeWithParsers parses src, parses nested HEEX templates, and returns the created trees.
 // Used by cached entry points . Returns nil on failure.
 func NewTreeWithParsers(src []byte, parsers map[Language]*tree_sitter.Parser) *Tree {
-	trunk := parsers[LangElixir].Parse(src, nil)
+	return newTree(LangElixir, src, parsers)
+}
+
+func newTree(lang Language, src []byte, parsers map[Language]*tree_sitter.Parser) *Tree {
+	trunk := parsers[lang].Parse(src, nil)
 	if trunk == nil {
 		return nil
 	}
 
-	heex := make(map[*tree_sitter.Node]*tree_sitter.Tree)
+	branches := make(map[uintptr]*Tree)
 	visitTree(trunk.RootNode(), func(node *tree_sitter.Node) {
-		if node.Kind() == "quoted_content" &&
+		// when visiting Elixir trees, parse nested ~H sigils as HEEX sub-trees
+		if lang == LangElixir &&
+			node.Kind() == "quoted_content" &&
 			node.Parent() != nil && node.Parent().Kind() == "sigil" &&
 			/* sigil_name */ node.PrevNamedSibling() != nil && node.PrevNamedSibling().Utf8Text(src) == "H" {
-			tree := parsers[LangHeex].Parse(src[node.StartByte():node.EndByte()], nil)
-			if tree == nil {
-				return
+			log.Printf("HEEX sub-tree %d at %s", node.Id(), node.ToSexp())
+			if tree := newTree(LangHeex, src[node.StartByte():node.EndByte()], parsers); tree != nil {
+				branches[node.Id()] = tree
 			}
+		}
 
-			heex[node] = tree
+		// when visiting HEEX trees, parse nested expressions as Elixir sub-trees
+		if lang == LangHeex && node.Kind() == "expression_value" {
+			log.Printf("Elixir sub-tree %d at %s", node.Id(), node.ToSexp())
+			if tree := newTree(LangElixir, src[node.StartByte():node.EndByte()], parsers); tree != nil {
+				branches[node.Id()] = tree
+			}
 		}
 	})
 
 	return &Tree{
-		Trunk: trunk,
-		Heex:  heex,
+		Trunk:    trunk,
+		Branches: branches,
 	}
 }
 

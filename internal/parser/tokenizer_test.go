@@ -2189,6 +2189,9 @@ TokDot (37:38)
 TokModule (38:41) "Bar"
 TokEOF (54:54)
 `},
+		{"<div class={\"{}\"} />", `TokString (12:16) "\"{}\""
+TokEOF (20:20)
+`},
 	}
 
 	for _, tt := range tests {

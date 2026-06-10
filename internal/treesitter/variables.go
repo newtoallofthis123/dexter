@@ -1,6 +1,7 @@
 package treesitter
 
 import (
+	"log"
 	"strings"
 
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
@@ -139,34 +140,40 @@ type resolvedScope struct {
 // a variable or module attribute, and returns the enclosing scope. Returns nil
 // if the position is not on a renameable variable.
 func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
-	cursorNode := nodeAtPosition(t.Trunk.RootNode(), line, col)
-	if cursorNode == nil || cursorNode.Kind() != "identifier" {
+	cursorNode := t.nodeAtPosition(t.Trunk.RootNode(), line, col)
+	log.Printf("cursorNode(%d, %d): [%d:%d] [%d:%d]\n%s\n%s\n",
+		line, col, cursorNode.node.StartByte(), cursorNode.node.EndByte(),
+		cursorNode.node.StartByte(), cursorNode.node.EndByte(), cursorNode.utf8Text(src), src)
+
+	if cursorNode == nil || cursorNode.node.Kind() != "identifier" {
 		return nil
 	}
 
-	varName := cursorNode.Utf8Text(src)
+	varName := cursorNode.utf8Text(src)
 
 	if isDefinitionKeyword(varName) {
 		return nil
 	}
 
+	cursorNode_ := cursorNode.trunkNode()
+
 	// Module attribute (@foo or @foo value): scope is the enclosing defmodule.
-	if isModuleAttributeIdent(cursorNode, src) {
-		scope := findEnclosingModule(cursorNode, src)
+	if isModuleAttributeIdent(cursorNode_, src) {
+		scope := findEnclosingModule(cursorNode_, src)
 		if scope == nil {
 			return nil
 		}
-		return &resolvedScope{cursorNode: cursorNode, scope: scope, varName: varName, moduleAttribute: true}
+		return &resolvedScope{cursorNode: cursorNode_, scope: scope, varName: varName, moduleAttribute: true}
 	}
 
 	// Check it's actually a variable — not a function name in a call or def keyword
-	if isFunctionNameInCall(cursorNode, src) {
+	if isFunctionNameInCall(cursorNode_, src) {
 		return nil
 	}
 
 	// Find the enclosing scope: a stab_clause that binds this variable, or
 	// the enclosing def/defp/defmacro/test call.
-	scope := findEnclosingScope(cursorNode, src, varName)
+	scope := findEnclosingScope(cursorNode_, src, varName)
 	if scope == nil {
 		return nil
 	}
@@ -177,11 +184,11 @@ func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
 	// This ensures bare function calls fall through to function reference lookup.
 	// Exception: if the cursor is on an assignment target (LHS of =), it is
 	// unambiguously a variable binding regardless of other occurrences.
-	if !isAssignmentTarget(cursorNode, src) && !variableDefinedInScope(scope, src, varName, line, col) {
+	if !isAssignmentTarget(cursorNode_, src) && !variableDefinedInScope(scope, src, varName, line, col) {
 		return nil
 	}
 
-	return &resolvedScope{cursorNode: cursorNode, scope: scope, varName: varName}
+	return &resolvedScope{cursorNode: cursorNode_, scope: scope, varName: varName}
 }
 
 // moduleAttributeExists returns true if @name appears in the subtree.
@@ -200,34 +207,59 @@ func moduleAttributeExists(node *tree_sitter.Node, src []byte, name string) bool
 	return false
 }
 
-// nodeAtPosition finds the deepest (most specific) node at the given position.
-func nodeAtPosition(node *tree_sitter.Node, line, col uint) *tree_sitter.Node {
-	if node == nil {
-		return nil
-	}
-	start := node.StartPosition()
-	end := node.EndPosition()
+// resolvedNode indicates a node that's been found, either directly in the trunk or
+// within a sub-tree. For trunk nodes, parentTree will be nil. For sub-tree nodes,
+// parentTree will point to the trunk node that contains the resolved node.
+type resolvedNode struct {
+	node   *tree_sitter.Node
+	parent *resolvedNode
+}
 
+// FIXME: remove once all resolvedNode usage respects sub-trees
+func (rn *resolvedNode) trunkNode() *tree_sitter.Node {
+	if rn.parent == nil {
+		return rn.node
+	}
+	return rn.parent.trunkNode()
+}
+
+func (rn *resolvedNode) utf8Text(src []byte) string {
+	if rn.parent == nil {
+		return rn.node.Utf8Text(src)
+	}
+	return rn.parent.utf8Text(src)[rn.node.StartByte():rn.node.EndByte()]
+}
+
+// nodeAtPosition finds the deepest (most specific) node at the given position.
+func (t *Tree) nodeAtPosition(node *tree_sitter.Node, line, col uint) *resolvedNode {
+	return t.nodeAtPositionInParent(nil, node, line, col)
+}
+
+func (t *Tree) nodeAtPositionInParent(parent *resolvedNode, node *tree_sitter.Node, line, col uint) *resolvedNode {
 	// Check if position is within this node
-	if line < uint(start.Row) || line > uint(end.Row) {
+	if node == nil || !nodeContainsPosition(node, line, col) {
 		return nil
 	}
-	if line == uint(start.Row) && col < uint(start.Column) {
-		return nil
-	}
-	if line == uint(end.Row) && col >= uint(end.Column) {
-		return nil
+
+	// Try to find a child within a sub-tree
+	if branch := t.Branches[node.Id()]; branch != nil {
+		log.Printf("submerging from %d", node.Id())
+		parent = &resolvedNode{node: node, parent: parent}
+		if resolved := branch.nodeAtPositionInParent(parent, branch.Trunk.RootNode(), line-node.StartPosition().Row, col); resolved != nil {
+			return resolved
+		}
+		return &resolvedNode{node: node, parent: parent}
 	}
 
 	// Try to find a more specific child
 	for i := uint(0); i < uint(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if found := nodeAtPosition(child, line, col); found != nil {
+		if found := t.nodeAtPositionInParent(parent, child, line, col); found != nil {
 			return found
 		}
 	}
 
-	return node
+	return &resolvedNode{node: node, parent: parent}
 }
 
 // isFunctionNameInCall returns true if the identifier is the function name
@@ -740,15 +772,15 @@ func FindVariablesInScope(src []byte, line, col uint) []string {
 // FindVariablesInScopeWithTree is like FindVariablesInScope but uses a
 // pre-parsed tree root.
 func (t *Tree) FindVariablesInScope(src []byte, line, col uint) []string {
-	cursorNode := nodeAtPosition(t.Trunk.RootNode(), line, col)
+	cursorNode := t.nodeAtPosition(t.Trunk.RootNode(), line, col)
 	if cursorNode == nil && col > 0 {
-		cursorNode = nodeAtPosition(t.Trunk.RootNode(), line, col-1)
+		cursorNode = t.nodeAtPosition(t.Trunk.RootNode(), line, col-1)
 	}
 	if cursorNode == nil {
 		return nil
 	}
 
-	scope := findEnclosingFunction(cursorNode, src)
+	scope := findEnclosingFunction(cursorNode.trunkNode(), src)
 	if scope == nil {
 		return nil
 	}

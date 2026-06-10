@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/remoteoss/dexter/internal/parser"
 	"github.com/remoteoss/dexter/internal/stdlib"
 	"github.com/remoteoss/dexter/internal/store"
+	"github.com/remoteoss/dexter/internal/treesitter"
 )
 
 func setupTestServer(t *testing.T) (*Server, func()) {
@@ -2919,6 +2921,61 @@ end
 	if foundBillingRef {
 		t.Error("should NOT return references to MyApp.Billing.TransactionRecord")
 	}
+}
+
+func TestPlayground(t *testing.T) {
+	src := `~H"""
+{@foo}
+"""`
+	tree := treesitter.NewTree([]byte(src))
+	defer tree.Close()
+
+	for _, t := range tree.Branches {
+		log.Printf("t: %s", t.Trunk.RootNode().ToSexp())
+		for _, tt := range t.Branches {
+			log.Printf("tt: %s", tt.Trunk.RootNode().ToSexp())
+		}
+	}
+}
+
+func TestReferences_HEEXNestedReference(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Nested module: defmodule MoneyResponse inside Money creates
+	// MyApp.Money.MoneyResponse, but the defmodule line says just "MoneyResponse"
+	src := `defmodule App do
+	use Phoenix.LiveView
+
+	def foo(assigns), do: ~H""
+
+	def render(assigns) do
+    ~H"""
+    <.foo />
+    <MyApp.foo />
+    """
+	end
+end
+`
+	indexFile(t, server.store, server.projectRoot, "lib/app.ex", src)
+
+	uri := "file://" + filepath.Join(server.projectRoot, "lib", "app.ex")
+	server.docs.Set(uri, src)
+
+	// Go-to-references on "foo" in the <.foo /> component (line 8, col 6)
+	locs := referencesAt(t, server, uri, 7, 6)
+	log.Printf("%+v", locs)
+	if len(locs) == 0 {
+		t.Fatal("expected references for function foo")
+	}
+
+	// Go-to-references on "foo" in the def line (line 4, col 6)
+	locs = referencesAt(t, server, uri, 3, 6)
+	log.Printf("%+v", locs)
+	if len(locs) == 0 {
+		t.Fatal("expected references for function foo")
+	}
+
 }
 
 func TestDefinition_QualifiedCallOnNestedModule(t *testing.T) {
