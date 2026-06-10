@@ -2153,6 +2153,13 @@ func TestLineStartsAccuracy(t *testing.T) {
 		assertLineStarts(t, src, result)
 		assertTokenAt(t, src, result, 0, 0, TokComment, "<!-- hello,\nworld! -->")
 	})
+
+	t.Run("HEEX: sigil contents", func(t *testing.T) {
+		src := "defmodule PageLive do\n  def render(assigns) do\n    ~H\"\"\"\n    <div />\n    \"\"\"\n  end\nend"
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 6, 2, TokEnd, "end")
+	})
 }
 
 func TestTokenizeHeex(t *testing.T) {

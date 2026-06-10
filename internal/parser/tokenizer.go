@@ -813,14 +813,12 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 		return start, line
 	}
 
+	// lineStarts has already been updated by `scanHeredocContent` / `scanRawHeredocContent`
 	result := TokenizeHeex(source[contentsStart:contentsEnd])
 	for _, t := range result.Tokens {
 		if t.Kind != TokEOF {
 			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + contentsStart, End: t.End + contentsStart, Line: t.Line + line - 1})
 		}
-	}
-	for _, ls := range result.LineStarts[1:] {
-		*lineStarts = append(*lineStarts, ls+start)
 	}
 
 	return start, line
