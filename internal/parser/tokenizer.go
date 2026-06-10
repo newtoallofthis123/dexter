@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -938,6 +939,55 @@ func TokenizeHeex(source []byte) TokenResult {
 		return i, line
 	}
 
+	scanTagName := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+		for i < len(source) {
+			switch {
+			// <.foo
+			case source[i] == '.':
+				*tokens = append(*tokens, Token{Kind: TokDot, Start: i, End: i + 1, Line: line})
+				i++
+
+				start := i
+				for i < len(source) && (isLetter(source[i]) || isDigit(source[i]) || source[i] == '_' || source[i] == '-') {
+					i++
+				}
+				if i == start {
+					return i, line
+				}
+
+				if isUpper(source[start]) {
+					*tokens = append(*tokens, Token{Kind: TokModule, Start: start, End: i, Line: line})
+				} else {
+					*tokens = append(*tokens, Token{Kind: TokIdent, Start: start, End: i, Line: line})
+					return i, line
+				}
+
+			// <div OR <Foo.bar
+			case isLetter(source[i]):
+				start := i
+				for i < len(source) && (isLetter(source[i]) || isDigit(source[i]) || source[i] == '_' || source[i] == '-') {
+					i++
+				}
+				if i == start {
+					return i, line
+				}
+
+				if i < len(source) && isUpper(source[start]) && source[i] == '.' {
+					// if this is a module name, keep looking for addn'l modules or function in chain
+					*tokens = append(*tokens, Token{Kind: TokModule, Start: start, End: i, Line: line})
+				} else {
+					// otherwise, this is a HTML tag name
+					return i, line
+				}
+
+			default:
+				return i, line
+			}
+		}
+
+		return i, line
+	}
+
 	scanTagAttr := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
 		var quoteChar byte
 		for i < len(source) {
@@ -967,6 +1017,9 @@ func TokenizeHeex(source []byte) TokenResult {
 				i++
 				return scanInterpolation(i, line, "}", lineStarts, tokens)
 
+			case ch == '>':
+				return i, line
+
 			default:
 				i++
 			}
@@ -977,8 +1030,6 @@ func TokenizeHeex(source []byte) TokenResult {
 
 	scanTag := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
 		hasName := false
-		var tagName strings.Builder
-		var tagNameTokens []Token
 		for i < len(source) {
 			switch {
 			case source[i] == '\n':
@@ -990,74 +1041,19 @@ func TokenizeHeex(source []byte) TokenResult {
 			case isWhitespace(source[i]):
 				i++
 
-			// <.foo
-			case source[i] == '.':
-				dotTkn := Token{Kind: TokDot, Start: i, End: i + 1, Line: line}
-				*tokens = append(*tokens, dotTkn)
-				i++
-
-				start := i
-				for i < len(source) && (isLetter(source[i]) || isDigit(source[i])) {
-					i++
-				}
-				if i == start {
-					break
-				}
-
-				var tknKind TokenKind
-				if isUpper(source[start]) {
-					tknKind = TokModule
-				} else {
-					tknKind = TokIdent
-					hasName = true
-				}
-				nameTkn := Token{Kind: tknKind, Start: start, End: i, Line: line}
-				*tokens = append(*tokens, nameTkn)
-				tagName.WriteByte('.')
-				tagName.Write(source[start:i])
-				tagNameTokens = append(tagNameTokens, dotTkn, nameTkn)
-
-			// <div OR <Foo.bar
-			case !hasName && isLetter(source[i]):
-				start := i
-				for i < len(source) && (isLetter(source[i]) || isDigit(source[i])) {
-					i++
-				}
-
-				var modTkn Token
-				if i < len(source) && isUpper(source[start]) && source[i] == '.' {
-					// if this is a module name, keep looking for addn'l modules or function in chain
-					modTkn = Token{Kind: TokModule, Start: start, End: i, Line: line}
-					*tokens = append(*tokens, modTkn)
-					tagNameTokens = append(tagNameTokens, modTkn)
-				} else {
-					// otherwise, this is a HTML tag name
-					hasName = true
-				}
-
-				tagName.Write(source[start:i])
+			// HTML tag name, function, or module/function
+			case !hasName:
+				i, line = scanTagName(i, line, lineStarts, tokens)
+				hasName = true
 
 			// attribute
 			case isLetter(source[i]):
 				i, line = scanTagAttr(i, line, lineStarts, tokens)
 
-			// HEEX special attribute ":if={}", ":for={}", ":let={}"
+			// HEEX special attribute ":if={}", ":for={}", ":let={}", ":type={}"
 			case source[i] == ':':
-				if i+1 >= len(source) {
-					break
-				}
-				if matchesSequence(source[i+1:], "if={") {
-					i += 4
-					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
-				} else if matchesSequence(source[i+1:], "for={") {
-					i += 5
-					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
-				} else if matchesSequence(source[i+1:], "let={") {
-					i += 5
-					i, line = scanInterpolation(i, line, "}", lineStarts, tokens)
-				} else {
-					i, line = scanTagAttr(i, line, lineStarts, tokens)
-				}
+				i++
+				i, line = scanTagAttr(i, line, lineStarts, tokens)
 
 			// self-closing tag
 			case source[i] == '/':
@@ -1068,37 +1064,8 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			// finish open tag
 			case source[i] == '>':
-				// FIXME: we need to parse nested tags recursively, otherwise this would find the inner `</div>`
-				// instead of the outer in this situation:
-				//
-				// <div>
-				//   <div></div>  <-- would find this one
-				// </div>         <-- want to find this one instead
-				for i < len(source) {
-					closeTag := "</" + tagName.String() + ">"
-					if matchesSequence(source[i:], closeTag) {
-						// consume </
-						i += 2
-						var offset int
-						for j, t := range tagNameTokens {
-							// on first token, calculate offset from open tag and shift
-							// all subsequent token start/end offsets by the same amount
-							if j == 0 {
-								offset = i - t.Start
-							}
-							*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + offset, End: t.End + offset, Line: line})
-						}
-						i += len(closeTag) - 2
-						break
-					}
-					if source[i] == '\n' {
-						*tokens = append(*tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
-						line++
-						i++
-						*lineStarts = append(*lineStarts, i)
-					}
-					i++
-				}
+				i++
+				return i, line
 
 			default:
 				i++
@@ -1152,6 +1119,12 @@ func TokenizeHeex(source []byte) TokenResult {
 						// EEX interpolation "<%"
 						// EEX special form "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end", "<% _ ->"
 						i, line = scanSpecialForm(i, line, &lineStarts, &tokens)
+					}
+				} else if source[i] == '/' {
+					i++
+					i, line = scanTagName(i, line, &lineStarts, &tokens)
+					if i < len(source) && source[i] == '>' {
+						i++
 					}
 				} else {
 					// HTML tag "<div"
@@ -1357,4 +1330,21 @@ func bytesEqual(b []byte, s string) bool {
 // keyword-list key (e.g. `do: :something`) and should emit TokIdent instead.
 func isKeywordKey(source []byte, i int) bool {
 	return i < len(source) && source[i] == ':' && (i+1 >= len(source) || source[i+1] != ':')
+}
+
+// DebugTokens returns a string represention similar to %+v for a slice of tokens.
+func DebugTokens(source []byte, tokens []Token) string {
+	var s strings.Builder
+
+	for _, t := range tokens {
+		switch t.Kind {
+		case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
+			fmt.Fprintf(&s, "%s (%d:%d)\n", t.Kind.String(), t.Start, t.End)
+
+		default:
+			fmt.Fprintf(&s, "%s (%d:%d) %#v\n", t.Kind.String(), t.Start, t.End, TokenText(source, t))
+		}
+	}
+
+	return s.String()
 }

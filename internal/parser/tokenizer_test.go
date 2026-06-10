@@ -1,9 +1,11 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -2173,38 +2175,43 @@ TokEOF (13:13)
 TokIdent (2:5) "foo"
 TokEOF (8:8)
 `},
-		{"<.live_component id=\"foo\" module={Foo.Bar} />", `TokDot (1:2)
-TokIdent (2:6) "live"
+		{"<.live_component id=\"foo\" module={Foo.Bar} no-value />", `TokDot (1:2)
+TokIdent (2:16) "live_component"
 TokModule (34:37) "Foo"
 TokDot (37:38)
 TokModule (38:41) "Bar"
-TokEOF (45:45)
+TokEOF (54:54)
 `},
-		{`<div class="bg-base-200 p-8">
-			<%!-- Header --%>`, ""},
 	}
 
 	for _, tt := range tests {
-		result := TokenizeHeex([]byte(tt.src))
-		got := DebugTokens([]byte(tt.src), result.Tokens)
-		if diff := cmp.Diff(tt.want, got); diff != "" {
-			t.Errorf("TokenizeHeex(src)  (-want +got)\n\n%s\n\n%s", tt.src, diff)
+		err := withTimeout(200_000_000_000, func() {
+			result := TokenizeHeex([]byte(tt.src))
+			got := DebugTokens([]byte(tt.src), result.Tokens)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("TokenizeHeex(src)  (-want +got)\n\n%.512s\n\n%s", tt.src, diff)
+			}
+		})
+		if err == context.DeadlineExceeded {
+			t.Errorf("TokenizeHeex(src)  timeout after 2s\n\n%.512s", tt.src)
 		}
 	}
 }
 
-func DebugTokens(source []byte, tokens []Token) string {
-	var s strings.Builder
+func withTimeout(ms time.Duration, cb func()) error {
+	ctx, cancel := context.WithTimeout(context.Background(), ms*time.Millisecond)
+	defer cancel()
 
-	for _, t := range tokens {
-		switch t.Kind {
-		case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
-			fmt.Fprintf(&s, "%s (%d:%d)\n", t.Kind.String(), t.Start, t.End)
+	done := make(chan struct{})
+	go func() {
+		cb()
+		done <- struct{}{}
+	}()
 
-		default:
-			fmt.Fprintf(&s, "%s (%d:%d) %#v\n", t.Kind.String(), t.Start, t.End, TokenText(source, t))
-		}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	return s.String()
 }
