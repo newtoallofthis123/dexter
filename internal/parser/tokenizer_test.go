@@ -2170,26 +2170,33 @@ func TestTokenizeHeex(t *testing.T) {
 			`TokComment (0:24) "<%!-- hello, world! --%>"
 TokEOF (24:24)
 `},
-		{"<div>hello!</div>", `TokEOF (17:17)
+		{"<div>hello!</div>", `TokHEEXOpenTag (0:1)
+TokHEEXCloseTag (11:13)
+TokEOF (17:17)
 `},
-		{"<.foo></.foo>", `TokDot (1:2)
+		{"<.foo></.foo>", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
 TokIdent (2:5) "foo"
+TokHEEXCloseTag (6:8)
 TokDot (8:9)
 TokIdent (9:12) "foo"
 TokEOF (13:13)
 `},
-		{"<.foo />", `TokDot (1:2)
+		{"<.foo />", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
 TokIdent (2:5) "foo"
 TokEOF (8:8)
 `},
-		{"<.live_component id=\"foo\" module={Foo.Bar} no-value />", `TokDot (1:2)
+		{"<.live_component id=\"foo\" module={Foo.Bar} no-value />", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
 TokIdent (2:16) "live_component"
 TokModule (34:37) "Foo"
 TokDot (37:38)
 TokModule (38:41) "Bar"
 TokEOF (54:54)
 `},
-		{"<div class={\"{}\"} />", `TokString (12:16) "\"{}\""
+		{"<div class={\"{}\"} />", `TokHEEXOpenTag (0:1)
+TokString (12:16) "\"{}\""
 TokEOF (20:20)
 `},
 	}

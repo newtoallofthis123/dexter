@@ -649,6 +649,15 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 		case TokIdent:
 			cm := currentModule()
 			if cm != "" && len(injectors) > 0 {
+				isHEEXFunction := i > 1 && tokens[i-1].Kind == TokDot &&
+					(tokens[i-2].Kind == TokHEEXOpenTag || tokens[i-2].Kind == TokHEEXCloseTag)
+				if isHEEXFunction {
+					name := tokenText(tok)
+					refs = append(refs, Reference{Module: cm, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
+					i++
+					continue
+				}
+
 				isStatementStart := i == 0 || tokens[i-1].Kind == TokEOL || tokens[i-1].Kind == TokComment
 				if isStatementStart {
 					name := tokenText(tok)

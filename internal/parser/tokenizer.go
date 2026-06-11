@@ -65,6 +65,8 @@ const (
 	TokAssoc                          // =>
 	TokDoubleColon                    // ::
 	TokPercent                        // %
+	TokHEEXOpenTag                    // <
+	TokHEEXCloseTag                   // </
 	TokNumber                         // integer or float literal
 	TokComment                        // # to end of line
 	TokEOL                            // newline
@@ -1057,6 +1059,7 @@ func TokenizeHeex(source []byte) TokenResult {
 					}
 				} else if source[i] == '/' {
 					i++
+					tokens = append(tokens, Token{Kind: TokHEEXCloseTag, Start: i - 2, End: i, Line: line})
 					i, line = scanTagName(i, line, &tokens)
 					if i < len(source) && source[i] == '>' {
 						i++
@@ -1064,6 +1067,7 @@ func TokenizeHeex(source []byte) TokenResult {
 				} else {
 					// HTML tag "<div"
 					// HEEX component "<.foo", "<Foo.bar"
+					tokens = append(tokens, Token{Kind: TokHEEXOpenTag, Start: i - 1, End: i, Line: line})
 					i, line = scanTag(i, line, &lineStarts, &tokens)
 				}
 			}
@@ -1281,7 +1285,7 @@ func DebugTokens(source []byte, tokens []Token) string {
 // Debug returns a string representation similar to %+v for a token.
 func (token Token) Debug(source []byte) string {
 	switch token.Kind {
-	case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
+	case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace, TokHEEXOpenTag, TokHEEXCloseTag:
 		return fmt.Sprintf("%s (%d:%d)\n", token.Kind.String(), token.Start, token.End)
 
 	default:

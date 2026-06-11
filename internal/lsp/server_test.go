@@ -3,7 +3,6 @@ package lsp
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"github.com/remoteoss/dexter/internal/parser"
 	"github.com/remoteoss/dexter/internal/stdlib"
 	"github.com/remoteoss/dexter/internal/store"
-	"github.com/remoteoss/dexter/internal/treesitter"
 )
 
 func setupTestServer(t *testing.T) (*Server, func()) {
@@ -2923,21 +2921,6 @@ end
 	}
 }
 
-func TestPlayground(t *testing.T) {
-	src := `~H"""
-{@foo}
-"""`
-	tree := treesitter.NewTree([]byte(src))
-	defer tree.Close()
-
-	for _, t := range tree.Branches {
-		log.Printf("t: %s", t.Trunk.RootNode().ToSexp())
-		for _, tt := range t.Branches {
-			log.Printf("tt: %s", tt.Trunk.RootNode().ToSexp())
-		}
-	}
-}
-
 func TestReferences_HEEXNestedReference(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
@@ -2962,18 +2945,22 @@ end
 	uri := "file://" + filepath.Join(server.projectRoot, "lib", "app.ex")
 	server.docs.Set(uri, src)
 
-	// Go-to-references on "foo" in the <.foo /> component (line 8, col 6)
-	locs := referencesAt(t, server, uri, 7, 6)
-	log.Printf("%+v", locs)
+	// Go-to-references on "foo" in the <MyApp.foo /> component (line 9, col 11)
+	locs := referencesAt(t, server, uri, 8, 11)
 	if len(locs) == 0 {
-		t.Fatal("expected references for function foo")
+		t.Fatal("expected references for function MyApp.foo")
+	}
+	if locs[0].Range.Start.Line != 8 {
+		t.Fatalf("expected reference on line 8, got line %d", locs[0].Range.Start.Line)
 	}
 
-	// Go-to-references on "foo" in the def line (line 4, col 6)
-	locs = referencesAt(t, server, uri, 3, 6)
-	log.Printf("%+v", locs)
+	// Go-to-references on "foo" in the <.foo /> line (line 8, col 6)
+	locs = referencesAt(t, server, uri, 7, 6)
 	if len(locs) == 0 {
-		t.Fatal("expected references for function foo")
+		t.Fatal("expected references for function .foo")
+	}
+	if locs[0].Range.Start.Line != 7 {
+		t.Fatalf("expected reference on line 7, got line %d", locs[0].Range.Start.Line)
 	}
 
 }
