@@ -110,7 +110,7 @@ func (tn *TreeNode) StartPosition() tree_sitter.Point {
 	p := tn.Tree.Root.StartPosition()
 	sp := tn.Node.StartPosition()
 	p.Row += sp.Row
-	if sp.Row == p.Row {
+	if sp.Row == 0 {
 		p.Column += sp.Column
 	} else {
 		p.Column = sp.Column
@@ -127,7 +127,7 @@ func (tn *TreeNode) EndPosition() tree_sitter.Point {
 	p := tn.Tree.Root.StartPosition()
 	ep := tn.Node.EndPosition()
 	p.Row += ep.Row
-	if ep.Row == p.Row {
+	if ep.Row == 0 {
 		p.Column += ep.Column
 	} else {
 		p.Column = ep.Column
