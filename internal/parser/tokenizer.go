@@ -820,11 +820,11 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 	return i, line
 }
 
-func scanSigilContents(sigilChars string, source []byte, start, end, contentsStart, contentsEnd, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+func scanSigilContents(sigilChars string, source []byte, start, end, contentsStart, contentsEnd, line int, lineStarts *[]int, tokens *[]Token) {
 	// only scan the contents of HEEX `~H` sigils
 	if sigilChars != "H" {
 		*tokens = append(*tokens, Token{Kind: TokSigil, Start: start, End: end, Line: line})
-		return start, line
+		return
 	}
 
 	// lineStarts has already been updated by `scanHeredocContent` / `scanRawHeredocContent`
@@ -834,8 +834,6 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + contentsStart, End: t.End + contentsStart, Line: t.Line + line - 1})
 		}
 	}
-
-	return start, line
 }
 
 func TokenizeHeex(source []byte) TokenResult {

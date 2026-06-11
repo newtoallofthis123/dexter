@@ -15,9 +15,8 @@ import (
 // in the document tree to their corresponding Elixir sub-tree. Sub-trees may
 // be nested arbitrarily deep, though in practice it will typically be 1-3 levels.
 //
-// For nested sub-trees, Root and RootNode point back to the parent tree branch
-// and node that contains the sub-tree. Navigation is possible both up (using Parent())
-// and down (using ChildCount() and Child(i)).
+// For nested sub-trees, Root points back to the parent tree that contains the
+// sub-tree. Navigation is possible both up (using Parent()) and down (using Child(i)).
 //
 // Elixir->HEEX: (sigil (sigil_name) node: (quoted_content))
 // HEEX->Elixir: (expression node: (expression_value))
@@ -33,7 +32,7 @@ func (t *Tree) TrunkNode() *TreeNode {
 	return &TreeNode{Tree: t, Node: t.Trunk.RootNode()}
 }
 
-// Close closes the trunk tree and any HEEX sub-trees.
+// Close recursively closes the trunk tree and any branch sub-trees.
 func (t *Tree) Close() {
 	for _, b := range t.Branches {
 		b.Close()

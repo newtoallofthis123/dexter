@@ -651,7 +651,7 @@ func collectTokenOccurrences(node *TreeNode, src []byte, token string, out *[]Va
 	kind := node.Kind()
 
 	// Skip subtrees that can't contain meaningful identifier references
-	if kind == "string" || kind == "comment" || kind == "sigil" || kind == "charlist" {
+	if kind == "string" || kind == "comment" || kind == "charlist" {
 		return
 	}
 
