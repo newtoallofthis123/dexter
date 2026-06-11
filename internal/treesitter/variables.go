@@ -389,7 +389,7 @@ func findEnclosingScope(node *TreeNode, src []byte, varName string) *TreeNode {
 		}
 		// Reached the file root without an inner scope: top-level script
 		// bindings (e.g. config/runtime.exs) are scoped to the whole file.
-		if current.Kind() == "source" {
+		if current.Kind() == "source" && current.Parent() == nil {
 			return current
 		}
 		prev = current
