@@ -1,7 +1,6 @@
 package treesitter
 
 import (
-	"log"
 	"strings"
 
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
@@ -106,11 +105,11 @@ func (t *Tree) NameExistsInScopeOf(src []byte, line, col uint, newName string) b
 // descended into — a same-named binding inside one is not a collision in the
 // scope rooted at node. (The root itself may be such a def call when renaming a
 // function-local; that is the chosen scope and is always searched.)
-func findFirstNonCallIdentifier(node *tree_sitter.Node, src []byte, name string) *tree_sitter.Node {
+func findFirstNonCallIdentifier(node *TreeNode, src []byte, name string) *TreeNode {
 	return findFirstNonCallIdentifierInScope(node, src, name, true)
 }
 
-func findFirstNonCallIdentifierInScope(node *tree_sitter.Node, src []byte, name string, isRoot bool) *tree_sitter.Node {
+func findFirstNonCallIdentifierInScope(node *TreeNode, src []byte, name string, isRoot bool) *TreeNode {
 	if node == nil {
 		return nil
 	}
@@ -130,8 +129,8 @@ func findFirstNonCallIdentifierInScope(node *tree_sitter.Node, src []byte, name 
 
 // resolvedScope holds the result of locating a variable's scope.
 type resolvedScope struct {
-	cursorNode      *tree_sitter.Node
-	scope           *tree_sitter.Node
+	cursorNode      *TreeNode
+	scope           *TreeNode
 	varName         string
 	moduleAttribute bool // true when the identifier is a module attribute (@foo)
 }
@@ -140,33 +139,29 @@ type resolvedScope struct {
 // a variable or module attribute, and returns the enclosing scope. Returns nil
 // if the position is not on a renameable variable.
 func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
-	cursorNode := t.nodeAtPosition(t.Trunk.RootNode(), line, col)
-	log.Printf("cursorNode(%d, %d): [%d:%d]\n%s\n",
-		line, col, cursorNode.node.StartByte(), cursorNode.node.EndByte(), cursorNode.utf8Text(src))
+	cursorNode := t.TrunkNode().ChildAtPosition(line, col)
 
-	if cursorNode == nil || cursorNode.node.Kind() != "identifier" {
+	if cursorNode == nil || cursorNode.Kind() != "identifier" {
 		return nil
 	}
 
-	varName := cursorNode.utf8Text(src)
+	varName := cursorNode.Utf8Text(src)
 
 	if isDefinitionKeyword(varName) {
 		return nil
 	}
 
-	cursorNode_ := cursorNode.trunkNode()
-
 	// Module attribute (@foo or @foo value): scope is the enclosing defmodule.
-	if isModuleAttributeIdent(cursorNode_, src) {
-		scope := findEnclosingModule(cursorNode_, src)
+	if isModuleAttributeIdent(cursorNode, src) {
+		scope := findEnclosingModule(cursorNode, src)
 		if scope == nil {
 			return nil
 		}
-		return &resolvedScope{cursorNode: cursorNode_, scope: scope, varName: varName, moduleAttribute: true}
+		return &resolvedScope{cursorNode: cursorNode, scope: scope, varName: varName, moduleAttribute: true}
 	}
 
 	// Check it's actually a variable — not a function name in a call or def keyword
-	if isFunctionNameInCall(cursorNode_, src) {
+	if isFunctionNameInCall(cursorNode, src) {
 		return nil
 	}
 
@@ -187,11 +182,11 @@ func (t *Tree) resolveVariableScope(src []byte, line, col uint) *resolvedScope {
 		return nil
 	}
 
-	return &resolvedScope{cursorNode: cursorNode_, scope: scope.node, varName: varName}
+	return &resolvedScope{cursorNode: cursorNode, scope: scope, varName: varName}
 }
 
 // moduleAttributeExists returns true if @name appears in the subtree.
-func moduleAttributeExists(node *tree_sitter.Node, src []byte, name string) bool {
+func moduleAttributeExists(node *TreeNode, src []byte, name string) bool {
 	if node == nil {
 		return false
 	}
@@ -206,87 +201,10 @@ func moduleAttributeExists(node *tree_sitter.Node, src []byte, name string) bool
 	return false
 }
 
-// resolvedNode indicates a node that's been found, either directly in the trunk or
-// within a sub-tree. For trunk nodes, parentTree will be nil. For sub-tree nodes,
-// parentTree will point to the trunk node that contains the resolved node.
-type resolvedNode struct {
-	node       *tree_sitter.Node
-	parentNode *resolvedNode
-}
-
-// FIXME: remove once all resolvedNode usage respects sub-trees
-func (rn *resolvedNode) trunkNode() *tree_sitter.Node {
-	if rn.parentNode == nil {
-		return rn.node
-	}
-	return rn.parentNode.trunkNode()
-}
-
-// parent moves up to the resolved node's nearest parent in the same tree.
-// If the node has no parent, moves to the parent tree node instead.
-func (rn *resolvedNode) parent() *resolvedNode {
-	if parent := rn.node.Parent(); parent != nil {
-		return &resolvedNode{parentNode: rn.parentNode, node: parent}
-	}
-	return rn.parentNode
-}
-
-func (rn *resolvedNode) startPosition() tree_sitter.Point {
-	if rn.parentNode == nil {
-		return rn.node.StartPosition()
-	}
-	p := rn.parentNode.startPosition()
-	p.Row += rn.node.StartPosition().Row
-	return p
-}
-
-func (rn *resolvedNode) child(i uint) *resolvedNode {
-	return &resolvedNode{parentNode: rn.parentNode, node: rn.node.Child(i)}
-}
-
-func (rn *resolvedNode) utf8Text(src []byte) string {
-	if rn.parentNode == nil {
-		return rn.node.Utf8Text(src)
-	}
-	return rn.parentNode.utf8Text(src)[rn.node.StartByte():rn.node.EndByte()]
-}
-
-// nodeAtPosition finds the deepest (most specific) node at the given position.
-func (t *Tree) nodeAtPosition(node *tree_sitter.Node, line, col uint) *resolvedNode {
-	return t.nodeAtPositionInParent(nil, node, line, col)
-}
-
-func (t *Tree) nodeAtPositionInParent(parent *resolvedNode, node *tree_sitter.Node, line, col uint) *resolvedNode {
-	// Check if position is within this node
-	if node == nil || !nodeContainsPosition(node, line, col) {
-		return nil
-	}
-
-	// Try to find a child within a sub-tree
-	if branch := t.Branches[node.Id()]; branch != nil {
-		log.Printf("submerging from %d", node.Id())
-		parent = &resolvedNode{node: node, parentNode: parent}
-		if resolved := branch.nodeAtPositionInParent(parent, branch.Trunk.RootNode(), line-node.StartPosition().Row, col); resolved != nil {
-			return resolved
-		}
-		return &resolvedNode{node: node, parentNode: parent}
-	}
-
-	// Try to find a more specific child
-	for i := uint(0); i < uint(node.ChildCount()); i++ {
-		child := node.Child(i)
-		if found := t.nodeAtPositionInParent(parent, child, line, col); found != nil {
-			return found
-		}
-	}
-
-	return &resolvedNode{node: node, parentNode: parent}
-}
-
 // isFunctionNameInCall returns true if the identifier is the function name
 // in a call expression (e.g., `foo` in `foo(args)`) or a function name being
 // defined (e.g., `foo` in `def foo(args) do`).
-func isFunctionNameInCall(node *tree_sitter.Node, src []byte) bool {
+func isFunctionNameInCall(node *TreeNode, src []byte) bool {
 	parent := node.Parent()
 	if parent == nil {
 		return false
@@ -379,16 +297,16 @@ func definesNestedScope(node *tree_sitter.Node, src []byte) bool {
 
 // isAssignmentTarget returns true if node is on the left-hand side of a `=`
 // binary operator, meaning it is unambiguously a variable binding.
-func isAssignmentTarget(node *resolvedNode, src []byte) bool {
-	parent := node.parent()
-	if parent == nil || parent.node.Kind() != "binary_operator" || parent.node.ChildCount() < 3 {
+func isAssignmentTarget(node *TreeNode, src []byte) bool {
+	parent := node.Parent()
+	if parent == nil || parent.Kind() != "binary_operator" || parent.ChildCount() < 3 {
 		return false
 	}
-	if parent.node.Child(1).Utf8Text(src) != "=" {
+	if parent.Child(1).Utf8Text(src) != "=" {
 		return false
 	}
-	left := parent.node.Child(0)
-	return node.node.StartByte() >= left.StartByte() && node.node.EndByte() <= left.EndByte()
+	left := parent.Child(0)
+	return node.StartByte() >= left.StartByte() && node.EndByte() <= left.EndByte()
 }
 
 // variableDefinedInScope returns true if varName is bound (defined) in the
@@ -396,7 +314,7 @@ func isAssignmentTarget(node *resolvedNode, src []byte) bool {
 // at a position other than the cursor. A bare identifier that only appears
 // at the cursor position is ambiguous (could be a zero-arity function call)
 // and should not be treated as a variable.
-func variableDefinedInScope(scope *resolvedNode, src []byte, varName string, cursorLine, cursorCol uint) bool {
+func variableDefinedInScope(scope *TreeNode, src []byte, varName string, cursorLine, cursorCol uint) bool {
 	return identifierExistsElsewhere(scope, src, varName, cursorLine, cursorCol, true)
 }
 
@@ -407,21 +325,21 @@ func variableDefinedInScope(scope *resolvedNode, src []byte, varName string, cur
 // the chosen scope itself, which may be such a def call) — otherwise a bare
 // top-level call sharing a name with a function-local would be misread as a
 // variable.
-func identifierExistsElsewhere(node *resolvedNode, src []byte, name string, line, col uint, isRoot bool) bool {
+func identifierExistsElsewhere(node *TreeNode, src []byte, name string, line, col uint, isRoot bool) bool {
 	if node == nil {
 		return false
 	}
 	if !isRoot && definesNestedScope(node, src) {
 		return false
 	}
-	if node.node.Kind() == "identifier" && node.utf8Text(src) == name && !isFunctionNameInCall(node, src) {
-		pos := node.startPosition()
+	if node.Kind() == "identifier" && node.Utf8Text(src) == name && !isFunctionNameInCall(node, src) {
+		pos := node.StartPosition()
 		if uint(pos.Row) != line || uint(pos.Column) != col {
 			return true
 		}
 	}
-	for i := uint(0); i < uint(node.node.ChildCount()); i++ {
-		if identifierExistsElsewhere(node.child(i), src, name, line, col, false) {
+	for i := uint(0); i < uint(node.ChildCount()); i++ {
+		if identifierExistsElsewhere(node.Child(i), src, name, line, col, false) {
 			return true
 		}
 	}
@@ -436,12 +354,12 @@ func identifierExistsElsewhere(node *resolvedNode, src []byte, name string, line
 // boundary ONLY when the cursor is inside the do_block — not when it's on the
 // right side of a <- clause, which is evaluated in the outer scope.
 // Otherwise, the enclosing def/defp/defmacro/test call is the scope.
-func findEnclosingScope(node *resolvedNode, src []byte, varName string) *resolvedNode {
+func findEnclosingScope(node *TreeNode, src []byte, varName string) *TreeNode {
 	prev := node
-	current := node.parent()
+	current := node.Parent()
 	for current != nil {
-		if current.node.Kind() == "stab_clause" {
-			if stabBindsVariable(current.node, src, varName) {
+		if current.Kind() == "stab_clause" {
+			if stabBindsVariable(current, src, varName) {
 				return current
 			}
 			// Body rebinds the variable (e.g. `fn ^x -> x = nil end`): the
@@ -449,12 +367,12 @@ func findEnclosingScope(node *resolvedNode, src []byte, varName string) *resolve
 			// Note: if the cursor is on a closure reference BEFORE the rebind
 			// in the same body, it will be scoped to the fn rather than the
 			// outer function. This is an acceptable limitation for a rare pattern.
-			if stabBodyRebindsVariable(current.node, src, varName) {
+			if stabBodyRebindsVariable(current, src, varName) {
 				return current
 			}
 		}
-		if current.node.Kind() == "call" && current.node.ChildCount() > 0 {
-			firstChild := current.node.Child(0)
+		if current.Kind() == "call" && current.ChildCount() > 0 {
+			firstChild := current.Child(0)
 			if firstChild.Kind() == "identifier" && functionKeywords[firstChild.Utf8Text(src)] {
 				return current
 			}
@@ -465,8 +383,8 @@ func findEnclosingScope(node *resolvedNode, src []byte, varName string) *resolve
 				return current
 			}
 			// with/for/etc.: scope boundary unless cursor is on clause 0's rhs (outer scope).
-			if callHasDoBlock(current.node) && callArgumentPatternsBindVariable(current.node, src, varName) {
-				if cursorNeedsWithScope(current.node, prev.node, node.node, src, varName) {
+			if callHasDoBlock(current) && callArgumentPatternsBindVariable(current, src, varName) {
+				if cursorNeedsWithScope(current, prev, node, src, varName) {
 					return current
 				}
 			}
@@ -477,13 +395,13 @@ func findEnclosingScope(node *resolvedNode, src []byte, varName string) *resolve
 			return current
 		}
 		prev = current
-		current = current.parent()
+		current = current.Parent()
 	}
 	return nil
 }
 
 // nodeIsInsideDoBlock returns true if child is inside the do_block of callNode.
-func nodeIsInsideDoBlock(callNode, child *tree_sitter.Node) bool {
+func nodeIsInsideDoBlock(callNode, child *TreeNode) bool {
 	for i := uint(0); i < uint(callNode.ChildCount()); i++ {
 		block := callNode.Child(i)
 		if block.Kind() == "do_block" &&
@@ -499,7 +417,7 @@ func nodeIsInsideDoBlock(callNode, child *tree_sitter.Node) bool {
 // given with/for call should act as a scope boundary: inside the do_block,
 // on a lvalue of <-/=, or on the rhs of clause N>0 (which references clause
 // N-1's binding, not the outer scope).
-func cursorNeedsWithScope(callNode, prev, cursor *tree_sitter.Node, src []byte, varName string) bool {
+func cursorNeedsWithScope(callNode, prev, cursor *TreeNode, src []byte, varName string) bool {
 	if nodeIsInsideDoBlock(callNode, prev) {
 		return true
 	}
@@ -527,7 +445,7 @@ func cursorNeedsWithScope(callNode, prev, cursor *tree_sitter.Node, src []byte, 
 // varName within the given subtree, skipping function names in calls.
 // skipScopeCheck should be true when node is the scope root itself (so we
 // don't immediately bail out of the scope we chose).
-func collectVariableOccurrences(node *tree_sitter.Node, src []byte, varName string, out *[]VariableOccurrence, skipScopeCheck bool) {
+func collectVariableOccurrences(node *TreeNode, src []byte, varName string, out *[]VariableOccurrence, skipScopeCheck bool) {
 	if node == nil {
 		return
 	}
@@ -587,7 +505,7 @@ func collectVariableOccurrences(node *tree_sitter.Node, src []byte, varName stri
 
 // stabBodyRebindsVariable returns true if the body of the stab_clause contains
 // an assignment (=) whose left-hand side unpinnedly binds varName.
-func stabBodyRebindsVariable(stabClause *tree_sitter.Node, src []byte, varName string) bool {
+func stabBodyRebindsVariable(stabClause *TreeNode, src []byte, varName string) bool {
 	for i := uint(0); i < uint(stabClause.ChildCount()); i++ {
 		child := stabClause.Child(i)
 		if child.Kind() == "arguments" {
@@ -602,7 +520,7 @@ func stabBodyRebindsVariable(stabClause *tree_sitter.Node, src []byte, varName s
 
 // subtreeContainsAssignmentOf returns true if the subtree has a binary "="
 // whose lvalue unpinnedly binds varName.
-func subtreeContainsAssignmentOf(node *tree_sitter.Node, src []byte, varName string) bool {
+func subtreeContainsAssignmentOf(node *TreeNode, src []byte, varName string) bool {
 	if node == nil {
 		return false
 	}
@@ -623,7 +541,7 @@ func subtreeContainsAssignmentOf(node *tree_sitter.Node, src []byte, varName str
 
 // collectStabArgs collects variable occurrences from the args of a stab_clause
 // only (not the body). Used when the body rebinds the variable.
-func collectStabArgs(stabClause *tree_sitter.Node, src []byte, varName string, out *[]VariableOccurrence) {
+func collectStabArgs(stabClause *TreeNode, src []byte, varName string, out *[]VariableOccurrence) {
 	for i := uint(0); i < uint(stabClause.ChildCount()); i++ {
 		child := stabClause.Child(i)
 		if child.Kind() == "arguments" {
@@ -637,7 +555,7 @@ func collectStabArgs(stabClause *tree_sitter.Node, src []byte, varName string, o
 //
 //	@foo       → unary_operator("@") → identifier("foo")
 //	@foo value → unary_operator("@") → call → identifier("foo") …
-func isModuleAttributeIdent(node *tree_sitter.Node, src []byte) bool {
+func isModuleAttributeIdent(node *TreeNode, src []byte) bool {
 	parent := node.Parent()
 	if parent == nil {
 		return false
@@ -657,7 +575,7 @@ func isModuleAttributeIdent(node *tree_sitter.Node, src []byte) bool {
 }
 
 // isAtUnaryOp returns true if node is a unary_operator with the @ operator.
-func isAtUnaryOp(node *tree_sitter.Node, src []byte) bool {
+func isAtUnaryOp(node *TreeNode, src []byte) bool {
 	if node.Kind() != "unary_operator" {
 		return false
 	}
@@ -671,7 +589,7 @@ func isAtUnaryOp(node *tree_sitter.Node, src []byte) bool {
 }
 
 // findEnclosingModule walks up from node to find the nearest defmodule call.
-func findEnclosingModule(node *tree_sitter.Node, src []byte) *tree_sitter.Node {
+func findEnclosingModule(node *TreeNode, src []byte) *TreeNode {
 	current := node.Parent()
 	for current != nil {
 		if current.Kind() == "call" && current.ChildCount() > 0 {
@@ -688,7 +606,7 @@ func findEnclosingModule(node *tree_sitter.Node, src []byte) *tree_sitter.Node {
 // collectModuleAttributeOccurrences collects all @attrName occurrences within
 // the subtree — that is, identifier nodes named attrName that are part of a
 // module attribute expression (@attrName or @attrName value).
-func collectModuleAttributeOccurrences(node *tree_sitter.Node, src []byte, attrName string, out *[]VariableOccurrence) {
+func collectModuleAttributeOccurrences(node *TreeNode, src []byte, attrName string, out *[]VariableOccurrence) {
 	if node == nil {
 		return
 	}
@@ -721,11 +639,11 @@ func FindTokenOccurrences(src []byte, token string) []VariableOccurrence {
 // pre-parsed tree root.
 func (t *Tree) FindTokenOccurrences(src []byte, token string) []VariableOccurrence {
 	var occurrences []VariableOccurrence
-	collectTokenOccurrences(t.Trunk.RootNode(), src, token, &occurrences)
+	collectTokenOccurrences(t.TrunkNode(), src, token, &occurrences)
 	return occurrences
 }
 
-func collectTokenOccurrences(node *tree_sitter.Node, src []byte, token string, out *[]VariableOccurrence) {
+func collectTokenOccurrences(node *TreeNode, src []byte, token string, out *[]VariableOccurrence) {
 	if node == nil {
 		return
 	}
@@ -793,15 +711,15 @@ func FindVariablesInScope(src []byte, line, col uint) []string {
 // FindVariablesInScopeWithTree is like FindVariablesInScope but uses a
 // pre-parsed tree root.
 func (t *Tree) FindVariablesInScope(src []byte, line, col uint) []string {
-	cursorNode := t.nodeAtPosition(t.Trunk.RootNode(), line, col)
+	cursorNode := t.TrunkNode().ChildAtPosition(line, col)
 	if cursorNode == nil && col > 0 {
-		cursorNode = t.nodeAtPosition(t.Trunk.RootNode(), line, col-1)
+		cursorNode = t.TrunkNode().ChildAtPosition(line, col-1)
 	}
 	if cursorNode == nil {
 		return nil
 	}
 
-	scope := findEnclosingFunction(cursorNode.trunkNode(), src)
+	scope := findEnclosingFunction(cursorNode, src)
 	if scope == nil {
 		return nil
 	}
@@ -813,7 +731,7 @@ func (t *Tree) FindVariablesInScope(src []byte, line, col uint) []string {
 }
 
 // findEnclosingFunction walks up from node to find the nearest def/defp/etc scope.
-func findEnclosingFunction(node *tree_sitter.Node, src []byte) *tree_sitter.Node {
+func findEnclosingFunction(node *TreeNode, src []byte) *TreeNode {
 	current := node.Parent()
 	for current != nil {
 		if current.Kind() == "call" && current.ChildCount() > 0 {
@@ -831,12 +749,12 @@ func findEnclosingFunction(node *tree_sitter.Node, src []byte) *tree_sitter.Node
 // excluding function names, definition keywords, and module attributes.
 // Skips stab_clauses and do..end calls that don't contain the cursor,
 // since variables don't leak out of those scopes in Elixir.
-func collectVariableNames(node *tree_sitter.Node, src []byte, seen map[string]bool, out *[]string, cursorLine, cursorCol uint) {
+func collectVariableNames(node *TreeNode, src []byte, seen map[string]bool, out *[]string, cursorLine, cursorCol uint) {
 	if node == nil {
 		return
 	}
 
-	if !nodeContainsPosition(node, cursorLine, cursorCol) {
+	if !node.ContainsPosition(cursorLine, cursorCol) {
 		// Variables in other case/fn clauses are not in scope.
 		if node.Kind() == "stab_clause" {
 			return
@@ -867,8 +785,8 @@ func collectVariableNames(node *tree_sitter.Node, src []byte, seen map[string]bo
 
 // extractArrowClauses returns the binary_operator nodes for <- and = in the
 // call's arguments, in source order.
-func extractArrowClauses(callNode *tree_sitter.Node, src []byte) []*tree_sitter.Node {
-	var clauses []*tree_sitter.Node
+func extractArrowClauses(callNode *TreeNode, src []byte) []*TreeNode {
+	var clauses []*TreeNode
 	for i := uint(0); i < uint(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
 		if child.Kind() != "arguments" {
@@ -897,7 +815,7 @@ func extractArrowClauses(callNode *tree_sitter.Node, src []byte) []*tree_sitter.
 //   - Cursor on rhs1: uses lhs0's binding — collect lhs0 + rhs1 (+ further rhs until rebind) + body
 //   - Cursor on lhs1: collect lhs1 + body
 //   - Cursor in body: uses last clause's binding — collect last lhs + body
-func collectWithOccurrences(callNode, cursor *tree_sitter.Node, src []byte, varName string, out *[]VariableOccurrence) {
+func collectWithOccurrences(callNode, cursor *TreeNode, src []byte, varName string, out *[]VariableOccurrence) {
 	clauses := extractArrowClauses(callNode, src)
 
 	// Find which clause and side the cursor is on
@@ -920,7 +838,7 @@ func collectWithOccurrences(callNode, cursor *tree_sitter.Node, src []byte, varN
 	}
 
 	// Find the do_block
-	var doBlock *tree_sitter.Node
+	var doBlock *TreeNode
 	for i := uint(0); i < uint(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
 		if child.Kind() == "do_block" {
@@ -993,7 +911,7 @@ func collectWithOccurrences(callNode, cursor *tree_sitter.Node, src []byte, varN
 // of =/← binary operators in a call's arguments, processing clauses
 // sequentially. Once a clause's pattern (left side) rebinds varName,
 // subsequent clauses and the do_block use the new binding — so we stop.
-func collectPatternExpressionOccurrences(callNode *tree_sitter.Node, src []byte, varName string, out *[]VariableOccurrence) {
+func collectPatternExpressionOccurrences(callNode *TreeNode, src []byte, varName string, out *[]VariableOccurrence) {
 	for i := uint(0); i < uint(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
 		if child.Kind() != "arguments" {
@@ -1023,7 +941,7 @@ func collectPatternExpressionOccurrences(callNode *tree_sitter.Node, src []byte,
 
 // callArgumentPatternsBindVariable checks whether a call's argument patterns
 // (left side of = or <- operators) contain an unpinned binding of varName.
-func callArgumentPatternsBindVariable(node *tree_sitter.Node, src []byte, varName string) bool {
+func callArgumentPatternsBindVariable(node *TreeNode, src []byte, varName string) bool {
 	for i := uint(0); i < uint(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Kind() != "arguments" {
@@ -1044,7 +962,7 @@ func callArgumentPatternsBindVariable(node *tree_sitter.Node, src []byte, varNam
 	return false
 }
 
-func callHasDoBlock(node *tree_sitter.Node) bool {
+func callHasDoBlock(node *TreeNode) bool {
 	for i := uint(0); i < uint(node.ChildCount()); i++ {
 		if node.Child(i).Kind() == "do_block" {
 			return true
@@ -1053,28 +971,11 @@ func callHasDoBlock(node *tree_sitter.Node) bool {
 	return false
 }
 
-// nodeContainsPosition returns true if the node's range includes the given position.
-// Tree-sitter end positions are exclusive, consistent with nodeAtPosition.
-func nodeContainsPosition(node *tree_sitter.Node, line, col uint) bool {
-	start := node.StartPosition()
-	end := node.EndPosition()
-	if line < uint(start.Row) || line > uint(end.Row) {
-		return false
-	}
-	if line == uint(start.Row) && col < uint(start.Column) {
-		return false
-	}
-	if line == uint(end.Row) && col >= uint(end.Column) {
-		return false
-	}
-	return true
-}
-
 // stabBindsVariable returns true if the stab_clause's arguments (pattern)
 // contain an unpinned identifier matching varName, meaning it creates a new
 // binding. Pinned variables (^varName) reference the outer scope and do NOT
 // create a new binding.
-func stabBindsVariable(stabClause *tree_sitter.Node, src []byte, varName string) bool {
+func stabBindsVariable(stabClause *TreeNode, src []byte, varName string) bool {
 	for i := uint(0); i < uint(stabClause.ChildCount()); i++ {
 		child := stabClause.Child(i)
 		if child.Kind() == "arguments" {
@@ -1087,7 +988,7 @@ func stabBindsVariable(stabClause *tree_sitter.Node, src []byte, varName string)
 // subtreeContainsUnpinnedIdentifier returns true if any identifier node in the
 // subtree has the given name AND is not pinned (^varName). Pinned variables
 // reference an outer binding and do not create a new one.
-func subtreeContainsUnpinnedIdentifier(node *tree_sitter.Node, src []byte, name string) bool {
+func subtreeContainsUnpinnedIdentifier(node *TreeNode, src []byte, name string) bool {
 	if node == nil {
 		return false
 	}
@@ -1107,7 +1008,7 @@ func subtreeContainsUnpinnedIdentifier(node *tree_sitter.Node, src []byte, name 
 }
 
 // isPinOperator returns true if node is a unary_operator with the ^ operator.
-func isPinOperator(node *tree_sitter.Node, src []byte) bool {
+func isPinOperator(node *TreeNode, src []byte) bool {
 	if node.Kind() != "unary_operator" {
 		return false
 	}

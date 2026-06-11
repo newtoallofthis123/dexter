@@ -1272,14 +1272,19 @@ func DebugTokens(source []byte, tokens []Token) string {
 	var s strings.Builder
 
 	for _, t := range tokens {
-		switch t.Kind {
-		case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
-			fmt.Fprintf(&s, "%s (%d:%d)\n", t.Kind.String(), t.Start, t.End)
-
-		default:
-			fmt.Fprintf(&s, "%s (%d:%d) %#v\n", t.Kind.String(), t.Start, t.End, TokenText(source, t))
-		}
+		s.WriteString(t.Debug(source))
 	}
 
 	return s.String()
+}
+
+// Debug returns a string representation similar to %+v for a token.
+func (token Token) Debug(source []byte) string {
+	switch token.Kind {
+	case TokDot, TokEOL, TokEOF, TokOpenBrace, TokCloseBrace:
+		return fmt.Sprintf("%s (%d:%d)\n", token.Kind.String(), token.Start, token.End)
+
+	default:
+		return fmt.Sprintf("%s (%d:%d) %#v\n", token.Kind.String(), token.Start, token.End, TokenText(source, token))
+	}
 }
