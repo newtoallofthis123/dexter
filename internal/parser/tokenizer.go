@@ -950,6 +950,10 @@ func TokenizeHeex(source []byte) TokenResult {
 					i++
 				}
 
+			case quoteChar != 0 && ch == quoteChar:
+				i++
+				return i, line
+
 			case quoteChar != 0:
 				i++
 
@@ -957,7 +961,7 @@ func TokenizeHeex(source []byte) TokenResult {
 				i++
 				return scanInterpolation(i, line, "}", tokens)
 
-			case ch == '>' || ch == '/':
+			case ch == '>':
 				return i, line
 
 			default:
@@ -1000,8 +1004,8 @@ func TokenizeHeex(source []byte) TokenResult {
 				i++
 				if i < len(source) && source[i] == '>' {
 					i++
+					return i, line
 				}
-				return i, line
 
 			// finish open tag
 			case source[i] == '>':
