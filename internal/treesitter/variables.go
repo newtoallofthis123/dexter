@@ -2,8 +2,6 @@ package treesitter
 
 import (
 	"strings"
-
-	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // VariableOccurrence is a position where a variable name appears.
@@ -269,7 +267,7 @@ var moduleKeywords = map[string]bool{
 // function definition do not leak to (and cannot reference) an enclosing
 // module/script scope, so traversals rooted at an outer scope must not descend
 // into these.
-func isFunctionDefinitionCall(node *tree_sitter.Node, src []byte) bool {
+func isFunctionDefinitionCall(node *TreeNode, src []byte) bool {
 	if node.Kind() != "call" || node.ChildCount() == 0 {
 		return false
 	}
@@ -279,7 +277,7 @@ func isFunctionDefinitionCall(node *tree_sitter.Node, src []byte) bool {
 
 // isModuleDefinitionCall reports whether node is a defmodule/defprotocol/defimpl
 // call, which opens a module-body scope.
-func isModuleDefinitionCall(node *tree_sitter.Node, src []byte) bool {
+func isModuleDefinitionCall(node *TreeNode, src []byte) bool {
 	if node.Kind() != "call" || node.ChildCount() == 0 {
 		return false
 	}
@@ -291,7 +289,7 @@ func isModuleDefinitionCall(node *tree_sitter.Node, src []byte) bool {
 // variable scope — a function or module definition. A traversal rooted at an
 // outer scope (a module body, or the whole file) must not descend into these,
 // or a rename/collision check would wrongly reach into an unrelated scope.
-func definesNestedScope(node *tree_sitter.Node, src []byte) bool {
+func definesNestedScope(node *TreeNode, src []byte) bool {
 	return isFunctionDefinitionCall(node, src) || isModuleDefinitionCall(node, src)
 }
 
