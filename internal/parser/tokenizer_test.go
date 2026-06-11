@@ -2215,6 +2215,21 @@ TokEOF (20:20)
 	}
 }
 
+func FuzzTokenizeHeex(f *testing.F) {
+	f.Fuzz(func(t *testing.T, src string) {
+		err := withTimeout(2_000, func() {
+			result := TokenizeHeex([]byte(src))
+			// should always output at least TokEOF
+			if len(result.Tokens) == 0 {
+				t.Errorf("TokenizeHeex(src)  empty output\n\n%.512s", src)
+			}
+		})
+		if err == context.DeadlineExceeded {
+			t.Errorf("TokenizeHeex(src)  timeout after 2s\n\n%.512s", src)
+		}
+	})
+}
+
 func withTimeout(ms time.Duration, cb func()) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ms*time.Millisecond)
 	defer cancel()

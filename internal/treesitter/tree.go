@@ -57,6 +57,11 @@ func (tn *TreeNode) IsNamed() bool {
 	return tn.Node.IsNamed()
 }
 
+// See tree_sitter.Node.ToSexp().
+func (tn *TreeNode) ToSexp() string {
+	return tn.Node.ToSexp()
+}
+
 // See tree_sitter.Node.StartByte().
 func (tn *TreeNode) StartByte() uint {
 	if tn.Tree.Root == nil {

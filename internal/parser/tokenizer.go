@@ -950,11 +950,14 @@ func TokenizeHeex(source []byte) TokenResult {
 					i++
 				}
 
+			case quoteChar != 0:
+				i++
+
 			case ch == '{':
 				i++
 				return scanInterpolation(i, line, "}", tokens)
 
-			case ch == '>':
+			case ch == '>' || ch == '/':
 				return i, line
 
 			default:
@@ -994,10 +997,11 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			// self-closing tag
 			case source[i] == '/':
-				if i+1 < len(source) && source[i+1] == '>' {
-					i += 2
-					return i, line
+				i++
+				if i < len(source) && source[i] == '>' {
+					i++
 				}
+				return i, line
 
 			// finish open tag
 			case source[i] == '>':
@@ -1046,7 +1050,7 @@ func TokenizeHeex(source []byte) TokenResult {
 						startLine := line
 						i, line = scanComment("--%>", i, line, &lineStarts)
 						tokens = append(tokens, Token{Kind: TokComment, Start: start, End: i, Line: startLine})
-					} else {
+					} else if i < len(source) {
 						// consume "=" output indicator from "<%=" special form prefix
 						if source[i] == '=' {
 							i++
