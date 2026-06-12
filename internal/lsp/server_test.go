@@ -529,7 +529,7 @@ end
 
 func TestApplySnippet_PipeGenericParamNamesPreserveOriginalIndex(t *testing.T) {
 	var item protocol.CompletionItem
-	applySnippet(&item, "call", 3, "", true, true)
+	applySnippet(&item, "call", 3, "", "def", true, true)
 
 	if item.Label != "call/3" {
 		t.Fatalf("expected label call/3, got %q", item.Label)
@@ -556,11 +556,25 @@ func TestCompletion_ElixirFormSnippets(t *testing.T) {
 		label   string
 		snippet string
 	}{
+		{"d", "do", "do\n\t$0\nend"},
+		{"defmod", "defmodule", "defmodule ${1:Name} do\n\t$0\nend"},
+		{"def", "def", "def ${1:name}$2 do\n\t$0\nend"},
+		{"def", "defp", "defp ${1:name}$2 do\n\t$0\nend"},
+		{"defm", "defmacro", "defmacro ${1:name}$2 do\n\t$0\nend"},
+		{"defmacr", "defmacrop", "defmacrop ${1:name}$2 do\n\t$0\nend"},
+		{"defs", "defstruct", "defstruct [${1:fields}]$0"},
+		{"defex", "defexception", "defexception [${1:fields}]$0"},
+		{"defprot", "defprotocol", "defprotocol ${1:Name} do\n\t$0\nend"},
+		{"defim", "defimpl", "defimpl ${1:Protocol}, for: ${2:Type} do\n\t$0\nend"},
+		{"defdel", "defdelegate", "defdelegate ${1:func}$2, to: ${3:module}$0"},
+		{"defgua", "defguard", "defguard ${1:name}$2 when ${3:condition}$0"},
+		{"defguar", "defguardp", "defguardp ${1:name}$2 when ${3:condition}$0"},
+		{"defov", "defoverridable", "defoverridable ${1:name}: ${2:arity}$0"},
 		{"fo", "for", "for ${1:pattern} <- ${2:enumerable} do\n\t$0\nend"},
 		{"wi", "with", "with ${1:pattern} <- ${2:expression} do\n\t$0\nend"},
 		{"cas", "case", "case ${1:expression} do\n\t${2:pattern} ->\n\t\t$0\nend"},
 		{"con", "cond", "cond do\n\t${1:condition} ->\n\t\t$0\nend"},
-		{"i", "if", "if ${1:condition} do\n\t$0\nend"},
+		{"i", "if", "if ${1:condition} do\n\t$0\nelse\n\t${2}\nend"},
 		{"unl", "unless", "unless ${1:condition} do\n\t$0\nend"},
 		{"rec", "receive", "receive do\n\t${1:pattern} ->\n\t\t$0\nend"},
 		{"tr", "try", "try do\n\t$0\nrescue\n\t${1:exception} ->\n\t\t${2:handler}\nend"},
@@ -608,31 +622,95 @@ func TestCompletion_ElixirFormSnippets_NoDuplicateWithKernel(t *testing.T) {
   defmacro unless(condition, clauses) do
     :ok
   end
+
+  defmacro def(call, expr) do
+    :ok
+  end
+
+  defmacro defmodule(alias, do_block) do
+    :ok
+  end
+
+  defmacro defstruct(fields) do
+    :ok
+  end
+
+  defmacro defexception(fields) do
+    :ok
+  end
+
+  defmacro defprotocol(name, do_block) do
+    :ok
+  end
+
+  defmacro defimpl(protocol, opts) do
+    :ok
+  end
+
+  defmacro defdelegate(call, opts) do
+    :ok
+  end
+
+  defmacro defguard(name, opts) do
+    :ok
+  end
+
+  defmacro defguardp(name, opts) do
+    :ok
+  end
+
+  defmacro defoverridable(opts) do
+    :ok
+  end
 end
 `)
 
 	uri := "file:///test.ex"
-	server.docs.Set(uri, "  i")
-	items := completionAt(t, server, uri, 0, 3)
 
-	var count int
-	for _, item := range items {
-		if item.Label == "if" || item.Label == "if/2" {
-			count++
-		}
+	// Each entry to check: prefix, label to look for, and the expected form snippet.
+	type check struct {
+		prefix  string
+		label   string
+		snippet string
 	}
-	if count != 1 {
-		t.Errorf("expected exactly 1 'if' completion, got %d", count)
+	checks := []check{
+		{"i", "if", elixirFormSnippets["if"]},
+		{"de", "def", elixirFormSnippets["def"]},
+		{"defs", "defstruct", elixirFormSnippets["defstruct"]},
+		{"defprot", "defprotocol", elixirFormSnippets["defprotocol"]},
 	}
 
-	// The one we get should be the snippet form, not the function-call form
-	for _, item := range items {
-		if item.Label == "if" {
-			if item.Kind != protocol.CompletionItemKindKeyword {
-				t.Errorf("expected Keyword kind for 'if', got %v", item.Kind)
+	for _, c := range checks {
+		server.docs.Set(uri, "  "+c.prefix)
+		items := completionAt(t, server, uri, 0, uint32(2+len(c.prefix)))
+
+		// Verify exactly one occurrence (form snippet, no dup from Kernel).
+		count := 0
+		for _, item := range items {
+			if item.Label == c.label || strings.HasPrefix(item.Label, c.label+"/") {
+				count++
 			}
-			if item.InsertText != elixirFormSnippets["if"] {
-				t.Errorf("expected form snippet for 'if', got %q", item.InsertText)
+		}
+		if count != 1 {
+			// Scan any labels matching to help debug.
+			var labels []string
+			for _, item := range items {
+				if strings.HasPrefix(item.Label, c.label) {
+					labels = append(labels, item.Label)
+				}
+			}
+			t.Errorf("%q: expected exactly 1 completion matching %q, got %d (matching labels: %v)", c.prefix, c.label, count, labels)
+		}
+
+		// The one we get should be the form snippet, not the kernel function form.
+		for _, item := range items {
+			if item.Label == c.label {
+				if item.Kind != protocol.CompletionItemKindKeyword {
+					t.Errorf("%q: expected Keyword kind, got %v", c.label, item.Kind)
+				}
+				if item.InsertText != c.snippet {
+					t.Errorf("%q: expected form snippet %q, got %q", c.label, c.snippet, item.InsertText)
+				}
 			}
 		}
 	}
@@ -651,6 +729,65 @@ func TestCompletion_ElixirFormSnippets_NoSnippetSupport(t *testing.T) {
 		if item.Label == "for" {
 			t.Error("form snippets should not appear when client lacks snippet support")
 		}
+	}
+}
+
+func TestCompletion_DoKeyword(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	uri := "file:///test.ex"
+	server.docs.Set(uri, "  defmodule Foo do")
+	items := completionAt(t, server, uri, 0, 17)
+
+	var found bool
+	for _, item := range items {
+		if item.Label == "do" {
+			found = true
+			if item.Kind != protocol.CompletionItemKindKeyword {
+				t.Errorf("expected Keyword kind for 'do', got %v", item.Kind)
+			}
+			if item.InsertText != elixirFormSnippets["do"] {
+				t.Errorf("expected form snippet for 'do', got %q", item.InsertText)
+			}
+			if item.InsertTextFormat != protocol.InsertTextFormatSnippet {
+				t.Error("expected InsertTextFormatSnippet for 'do'")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'do' in completions")
+	}
+}
+
+func TestCompletion_DoKeyword_NoSnippetSupport(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+	server.snippetSupport = false
+
+	uri := "file:///test.ex"
+	server.docs.Set(uri, "  defmodule Foo do")
+	items := completionAt(t, server, uri, 0, 17)
+
+	var found bool
+	for _, item := range items {
+		if item.Label == "do" {
+			found = true
+			if item.Kind != protocol.CompletionItemKindKeyword {
+				t.Errorf("expected Keyword kind for 'do', got %v", item.Kind)
+			}
+			if !item.Preselect {
+				t.Error("expected 'do' item to have Preselect=true")
+			}
+			if item.InsertText != "" {
+				t.Errorf("expected no InsertText for 'do' without snippet support, got %q", item.InsertText)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'do' in completions")
 	}
 }
 
@@ -1648,6 +1785,352 @@ end`
 	}
 	if !found {
 		t.Errorf("expected use MyApp.MoxBase with mod: MyApp.CustomMock; got %+v", calls)
+	}
+}
+
+func TestCompletion_UseInjectedSkippedForFormSnippet(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Module that exports `if` (name overlaps with elixirFormSnippets)
+	indexFile(t, server.store, server.projectRoot, "lib/custom_if.ex", `defmodule MyApp.CustomIf do
+  alias MyApp.CustomIf
+
+  defmacro __using__(_opts) do
+    quote do
+      import CustomIf
+    end
+  end
+
+  defmacro if(condition, clauses), do: {:if, condition, clauses}
+end
+`)
+
+	uri := "file:///test.ex"
+	server.docs.Set(uri, `defmodule MyApp.Test do
+  use MyApp.CustomIf
+
+  i
+end`)
+
+	// col=3 — cursor after "i" (prefix "i")
+	items := completionAt(t, server, uri, 3, 3)
+
+	var count int
+	for _, item := range items {
+		if item.Label == "if" || item.Label == "if/2" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 'if' completion via use-injection, got %d", count)
+	}
+
+	// The one we get should be the form snippet, not the function-call form
+	for _, item := range items {
+		if item.Label == "if" {
+			if item.Kind != protocol.CompletionItemKindKeyword {
+				t.Errorf("expected Keyword kind for 'if', got %v", item.Kind)
+			}
+			if item.InsertText != elixirFormSnippets["if"] {
+				t.Errorf("expected form snippet for 'if', got %q", item.InsertText)
+			}
+		}
+	}
+}
+
+func TestCompletion_DoBlockSnippets(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Module exporting macros whose names match doBlockSnippets templates.
+	// When imported, these should produce the custom do/end block snippet
+	// instead of an auto-generated arg list like test(${1:arg1}, ${2:arg2}).
+	indexFile(t, server.store, server.projectRoot, "lib/test_macros.ex", `defmodule MyApp.TestMacros do
+  defmacro test(description, block) do
+    :ok
+  end
+
+  defmacro describe(description, block) do
+    :ok
+  end
+
+  defmacro setup(block) do
+    :ok
+  end
+
+  defmacro assert_raise(exception, block) do
+    :ok
+  end
+end
+`)
+
+	uri := "file:///test.ex"
+
+	tests := []struct {
+		prefix  string
+		label   string
+		snippet string
+	}{
+		{"tes", "test/2", "test \"${1:description}\" do\n\t$0\nend"},
+		{"desc", "describe/2", "describe \"${1:description}\" do\n\t$0\nend"},
+		{"set", "setup/1", "setup do\n\t$0\nend"},
+		{"assert_rai", "assert_raise/2", "assert_raise ${1:exception} do\n\t$0\nend"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			// Single-line file: import on line 0, prefix on line 1.
+			doc := "import MyApp.TestMacros\n  " + tt.prefix
+			server.docs.Set(uri, doc)
+			items := completionAt(t, server, uri, 1, uint32(2+len(tt.prefix)))
+
+			var found bool
+			for _, item := range items {
+				if item.Label == tt.label {
+					found = true
+					if item.InsertText != tt.snippet {
+						t.Errorf("expected snippet %q, got %q", tt.snippet, item.InsertText)
+					}
+					if item.InsertTextFormat != protocol.InsertTextFormatSnippet {
+						t.Error("expected InsertTextFormatSnippet")
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected to find completion item %q", tt.label)
+			}
+		})
+	}
+}
+
+func TestCompletion_DoBlockSnippets_RequireMacroKind(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/plain_helpers.ex", `defmodule MyApp.PlainHelpers do
+  def test(description, block) do
+    :ok
+  end
+
+  def setup(block) do
+    :ok
+  end
+end
+`)
+
+	uri := "file:///test.ex"
+
+	tests := []struct {
+		prefix string
+		label  string
+		text   string
+	}{
+		{"tes", "test/2", "test ${1:description}, ${2:block}$0"},
+		{"set", "setup/1", "setup ${1:block}$0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			doc := "import MyApp.PlainHelpers\n  " + tt.prefix
+			server.docs.Set(uri, doc)
+			items := completionAt(t, server, uri, 1, uint32(2+len(tt.prefix)))
+
+			var found bool
+			for _, item := range items {
+				if item.Label == tt.label {
+					found = true
+					if item.InsertText != tt.text {
+						t.Errorf("expected normal call snippet %q, got %q", tt.text, item.InsertText)
+					}
+					if item.InsertTextFormat != protocol.InsertTextFormatSnippet {
+						t.Error("expected InsertTextFormatSnippet")
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected to find completion item %q", tt.label)
+			}
+		})
+	}
+}
+
+func TestCompletion_DoBlockSnippets_NoSnippetSupport(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+	server.snippetSupport = false
+
+	indexFile(t, server.store, server.projectRoot, "lib/test_macros2.ex", `defmodule MyApp.TestMacros2 do
+  defmacro test(description, block) do
+    :ok
+  end
+
+  defmacro setup(block) do
+    :ok
+  end
+end
+`)
+
+	uri := "file:///test.ex"
+
+	// Without snippets, doBlockSnippets templates are skipped. The noParenFuncs
+	// check still applies, so test/2 and setup/1 use no-paren call style.
+	// Parameter names come from the module definition.
+	tests := []struct {
+		prefix string
+		label  string
+		text   string
+	}{
+		{"tes", "test/2", "test description, block"},
+		{"set", "setup/1", "setup block"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			doc := "import MyApp.TestMacros2\n  " + tt.prefix
+			server.docs.Set(uri, doc)
+			items := completionAt(t, server, uri, 1, uint32(2+len(tt.prefix)))
+
+			var found bool
+			for _, item := range items {
+				if item.Label == tt.label {
+					found = true
+					if item.InsertText != tt.text {
+						t.Errorf("expected %q, got %q", tt.text, item.InsertText)
+					}
+					if item.InsertTextFormat == protocol.InsertTextFormatSnippet {
+						t.Error("should not have snippet format")
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected to find completion item %q", tt.label)
+			}
+		})
+	}
+}
+
+func TestCompletion_NoParenCallStyle(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/assertions.ex", `defmodule MyApp.Assertions do
+  defmacro assert(expression) do
+    :ok
+  end
+
+  defmacro refute(expression) do
+    :ok
+  end
+
+  def validate(input) do
+    :ok
+  end
+end
+`)
+
+	uri := "file:///test.ex"
+
+	// assert and refute are in noParenFuncs → no parentheses.
+	// validate is a regular function → parentheses.
+	// Parameter names come from the module definition.
+	tests := []struct {
+		prefix  string
+		label   string
+		snippet string
+	}{
+		{"ass", "assert/1", "assert ${1:expression}$0"},
+		{"ref", "refute/1", "refute ${1:expression}$0"},
+		{"val", "validate/1", "validate(${1:input})$0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			doc := "import MyApp.Assertions\n  " + tt.prefix
+			server.docs.Set(uri, doc)
+			items := completionAt(t, server, uri, 1, uint32(2+len(tt.prefix)))
+
+			var found bool
+			for _, item := range items {
+				if item.Label == tt.label {
+					found = true
+					if item.InsertText != tt.snippet {
+						t.Errorf("expected snippet %q, got %q", tt.snippet, item.InsertText)
+					}
+					if item.InsertTextFormat != protocol.InsertTextFormatSnippet {
+						t.Error("expected InsertTextFormatSnippet")
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected to find completion item %q", tt.label)
+			}
+		})
+	}
+}
+
+func TestCompletion_NoParenCallStyle_NoSnippetSupport(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+	server.snippetSupport = false
+
+	indexFile(t, server.store, server.projectRoot, "lib/assertions2.ex", `defmodule MyApp.Assertions2 do
+  defmacro assert(expression) do
+    :ok
+  end
+
+  defmacro refute(expression) do
+    :ok
+  end
+
+  def validate(input) do
+    :ok
+  end
+end
+`)
+
+	uri := "file:///test.ex"
+
+	// Without snippets, assert/refute still use no-paren style.
+	// validate uses regular paren style.
+	// Parameter names come from the module definition.
+	tests := []struct {
+		prefix string
+		label  string
+		text   string
+	}{
+		{"ass", "assert/1", "assert expression"},
+		{"ref", "refute/1", "refute expression"},
+		{"val", "validate/1", "validate(input)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			doc := "import MyApp.Assertions2\n  " + tt.prefix
+			server.docs.Set(uri, doc)
+			items := completionAt(t, server, uri, 1, uint32(2+len(tt.prefix)))
+
+			var found bool
+			for _, item := range items {
+				if item.Label == tt.label {
+					found = true
+					if item.InsertText != tt.text {
+						t.Errorf("expected %q, got %q", tt.text, item.InsertText)
+					}
+					if item.InsertTextFormat == protocol.InsertTextFormatSnippet {
+						t.Error("should not have snippet format")
+					}
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected to find completion item %q", tt.label)
+			}
+		})
 	}
 }
 
