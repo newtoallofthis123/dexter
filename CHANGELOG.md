@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1] - 2026-06-12
+
+### Added
+
+- **Structural completion snippets** — completions now include snippets for common Elixir forms such as `do`, `defmodule`, `def`, `defp`, `defmacro`, `defstruct`, `defprotocol`, `defimpl`, `defdelegate`, guards, `if`, `case`, `with`, `try`, and ExUnit-style macros; snippet-aware clients also avoid duplicate special-form completions when the same names are imported through `use`. This is an improvement and also fixes some VS Code usability issues do to how VS Code handles completions. Thanks @superhawk610.
+
+### Fixed
+
+- **Index WAL growing unchecked** — SQLite WAL files are capped and checkpointed after reindexing, preventing `.dexter/dexter.db-wal` from growing endlessly. Thanks @flowerett.
+- **Top-level script variables** — variables in `.exs` files such as `config/runtime.exs` can now be renamed and highlighted without leaking into nested module or function scopes
+- **Document symbols** — local assignments and ordinary function calls no longer appear in the outline, while split-line ExUnit-style macro heads are still shown correctly. Thanks @cjbottaro.
+- **Alias-aware import/use/require references** — short aliases in `import`, `use`, and `require` statements now resolve to the full module for references and rename edits
+- **Formatter improvements and fixes** — the persistent formatter server now starts Mix's supervisor tree so plugins can call Mix APIs like `Mix.Project.config/0`, and Dexter passes all `.formatter.exs` options through to formatter plugins so plugin-specific settings such as HEEX options are honored. Thanks @superhawk610 and @ogomezba.
+
 ## [0.7.0] - 2026-05-28
 
 ### Added
