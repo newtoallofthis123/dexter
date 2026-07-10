@@ -655,11 +655,11 @@ func TestFindVariableOccurrences_FullWorkerFile(t *testing.T) {
   defdelegate backoff(job), to: MyApp.Oban.EmailWorker
 end`)
 
-	root, cleanup := parseElixir(src)
-	if root == nil {
+	tree := NewTree(src)
+	if tree == nil {
 		t.Fatal("failed to parse")
 	}
-	defer cleanup()
+	defer tree.Close()
 
 	// Find the actual line for "transfer_amount = Money.new" in this test source
 	lines := strings.Split(string(src), "\n")
@@ -675,7 +675,7 @@ end`)
 	}
 	t.Logf("transfer_amount rebind is at line %d: %q", transferLine, lines[transferLine])
 
-	occs := FindVariableOccurrences(src, uint(transferLine), 6)
+	occs := tree.FindVariableOccurrences(src, uint(transferLine), 6)
 	t.Logf("transfer_amount from line %d col 6: %d occs: %+v", transferLine, len(occs), occs)
 	if occs == nil {
 		t.Fatal("expected variable occurrences for 'transfer_amount', got nil")
@@ -1459,12 +1459,15 @@ end
 
 apply(config)
 `)
-	root, cleanup := parseElixir(src)
-	defer cleanup()
+	tree := NewTree(src)
+	if tree == nil {
+		t.Fatal("failed to parse")
+	}
+	defer tree.Close()
 
 	// Renaming top-level "config" to "other" is safe: "other" only exists as a
 	// def-local, which is a different scope.
-	if NameExistsInScopeOf(root, src, 0, 0, "other") {
+	if tree.NameExistsInScopeOf(src, 0, 0, "other") {
 		t.Error("false-positive collision: 'other' is a def-local, not in the top-level scope")
 	}
 }
@@ -1555,5 +1558,6 @@ config :app, value: some_helper()
 	occs := FindVariableOccurrences(src, 2, uint(len("config :app, value: ")))
 	if occs != nil {
 		t.Errorf("expected nil for bare top-level call, got %d occurrences: %+v", len(occs), occs)
+
 	}
 }

@@ -1,9 +1,13 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 // tokenizeNoEOF runs Tokenize and strips the trailing TokEOF for cleaner assertions.
@@ -2077,9 +2081,8 @@ func TestTokenize_EscapedNewlineLineTracking(t *testing.T) {
 }
 
 func TestLineStartsAccuracy(t *testing.T) {
-	assertLineStarts := func(t *testing.T, src string) {
+	assertLineStarts := func(t *testing.T, src string, result TokenResult) {
 		t.Helper()
-		result := TokenizeFull([]byte(src))
 		lineStarts := result.LineStarts
 		lines := strings.Split(src, "\n")
 		if len(lineStarts) != len(lines) {
@@ -2100,9 +2103,8 @@ func TestLineStartsAccuracy(t *testing.T) {
 		}
 	}
 
-	assertTokenAt := func(t *testing.T, src string, line0, col int, wantKind TokenKind, wantText string) {
+	assertTokenAt := func(t *testing.T, src string, result TokenResult, line0, col int, wantKind TokenKind, wantText string) {
 		t.Helper()
-		result := TokenizeFull([]byte(src))
 		offset := LineColToOffset(result.LineStarts, line0, col)
 		idx := TokenAtOffset(result.Tokens, offset)
 		if idx < 0 {
@@ -2119,25 +2121,129 @@ func TestLineStartsAccuracy(t *testing.T) {
 
 	t.Run("heredoc", func(t *testing.T) {
 		src := "defmodule MyApp.Example do\n  @moduledoc \"\"\"\n  This is a long\n  multiline heredoc\n  with several lines\n  of documentation.\n  \"\"\"\n\n  @type t :: %__MODULE__{\n          name: String.t(),\n          age: Integer.t()\n        }\n\n  def hello do\n    :world\n  end\nend"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 9, 16, TokModule, "String")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 9, 16, TokModule, "String")
 	})
 
 	t.Run("multiline string", func(t *testing.T) {
 		src := "x = \"line one\nline two\nline three\"\ny = Enum.map(list, fn x -> x end)"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 3, 4, TokModule, "Enum")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 3, 4, TokModule, "Enum")
 	})
 
 	t.Run("sigil heredoc", func(t *testing.T) {
 		src := "x = ~s\"\"\"\nline one\nline two\n\"\"\"\ny = MyModule.func()"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 4, 4, TokModule, "MyModule")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 4, 4, TokModule, "MyModule")
 	})
 
 	t.Run("multiline interpolation", func(t *testing.T) {
 		src := "x = \"hello #{\n  some_func()\n}\"\ny = String.trim(x)"
-		assertLineStarts(t, src)
-		assertTokenAt(t, src, 3, 4, TokModule, "String")
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 3, 4, TokModule, "String")
 	})
+
+	t.Run("HEEX: comment", func(t *testing.T) {
+		src := "<!-- hello,\nworld! -->"
+		result := TokenizeHeex([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 0, 0, TokComment, "<!-- hello,\nworld! -->")
+	})
+
+	t.Run("HEEX: sigil contents", func(t *testing.T) {
+		src := "defmodule PageLive do\n  def render(assigns) do\n    ~H\"\"\"\n    <div />\n    \"\"\"\n  end\nend"
+		result := TokenizeFull([]byte(src))
+		assertLineStarts(t, src, result)
+		assertTokenAt(t, src, result, 6, 2, TokEnd, "end")
+	})
+}
+
+func TestTokenizeHeex(t *testing.T) {
+	tests := []struct {
+		src, want string
+	}{
+		{"<%!-- hello, world! --%>",
+			`TokComment (0:24) "<%!-- hello, world! --%>"
+TokEOF (24:24)
+`},
+		{"<div>hello!</div>", `TokHEEXOpenTag (0:1)
+TokHEEXCloseTag (11:13)
+TokEOF (17:17)
+`},
+		{"<.foo></.foo>", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
+TokIdent (2:5) "foo"
+TokHEEXCloseTag (6:8)
+TokDot (8:9)
+TokIdent (9:12) "foo"
+TokEOF (13:13)
+`},
+		{"<.foo />", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
+TokIdent (2:5) "foo"
+TokEOF (8:8)
+`},
+		{"<.live_component id=\"foo\" module={Foo.Bar} no-value />", `TokHEEXOpenTag (0:1)
+TokDot (1:2)
+TokIdent (2:16) "live_component"
+TokModule (34:37) "Foo"
+TokDot (37:38)
+TokModule (38:41) "Bar"
+TokEOF (54:54)
+`},
+		{"<div class={\"{}\"} />", `TokHEEXOpenTag (0:1)
+TokString (12:16) "\"{}\""
+TokEOF (20:20)
+`},
+	}
+
+	for _, tt := range tests {
+		err := withTimeout(2_000, func() {
+			result := TokenizeHeex([]byte(tt.src))
+			got := DebugTokens([]byte(tt.src), result.Tokens)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("TokenizeHeex(src)  (-want +got)\n\n%.512s\n\n%s", tt.src, diff)
+			}
+		})
+		if err == context.DeadlineExceeded {
+			t.Errorf("TokenizeHeex(src)  timeout after 2s\n\n%.512s", tt.src)
+		}
+	}
+}
+
+func FuzzTokenizeHeex(f *testing.F) {
+	f.Fuzz(func(t *testing.T, src string) {
+		err := withTimeout(2_000, func() {
+			result := TokenizeHeex([]byte(src))
+			// should always output at least TokEOF
+			if len(result.Tokens) == 0 {
+				t.Errorf("TokenizeHeex(src)  empty output\n\n%.512s", src)
+			}
+		})
+		if err == context.DeadlineExceeded {
+			t.Errorf("TokenizeHeex(src)  timeout after 2s\n\n%.512s", src)
+		}
+	})
+}
+
+func withTimeout(ms time.Duration, cb func()) error {
+	ctx, cancel := context.WithTimeout(context.Background(), ms*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		cb()
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
