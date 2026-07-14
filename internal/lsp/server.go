@@ -82,6 +82,15 @@ type Server struct {
 	beams  map[string]*beamProcess // build root → persistent BEAM process
 	beamMu sync.Mutex
 
+	diagBeams  map[string]*beamProcess // mix root → dedicated diagnostics BEAM process
+	diagBeamMu sync.Mutex
+
+	diagStore *diagnosticStore // per-URI diagnostics merged across sources
+	diag      *diagManager     // Tier C: compile-on-save orchestration
+	syntax    *syntaxChecker   // Tier A: syntax-on-change orchestration
+
+	workDoneProgressSupported bool // client supports $/progress WorkDoneProgress
+
 	erlangBuildRoots   map[string]*erlangBuildRootState // build root → runtime resolution state
 	erlangRuntimeCache map[string]*erlangRuntimeCache   // runtime key → cached OTP modules/exports
 	erlangRuntimeMu    sync.Mutex
@@ -116,7 +125,7 @@ func (s *Server) debugNow() time.Time {
 }
 
 func NewServer(s *store.Store, projectRoot string) *Server {
-	return &Server{
+	srv := &Server{
 		store:              s,
 		docs:               NewDocumentStore(),
 		projectRoot:        projectRoot,
@@ -126,7 +135,32 @@ func NewServer(s *store.Store, projectRoot string) *Server {
 		erlangRuntimeCache: make(map[string]*erlangRuntimeCache),
 		usingCache:         make(map[string]*usingCacheEntry),
 		depsCache:          make(map[string]bool),
+		diagBeams:          make(map[string]*beamProcess),
 	}
+
+	// Diagnostics are a fire-and-forget async pipeline; they never block or
+	// degrade the interactive features. The store reads s.client lazily since
+	// it is only wired up in Serve, after NewServer.
+	srv.diagStore = newDiagnosticStore(func() protocol.Client { return srv.client })
+	srv.syntax = newSyntaxChecker(
+		syntaxDebounce,
+		srv.runSyntaxCheck,
+		func(docURI protocol.DocumentURI, diags []protocol.Diagnostic) {
+			srv.diagStore.set(docURI, diagSourceSyntax, diags)
+		},
+		srv.debugf,
+	)
+	srv.diag = newDiagManager(
+		srv.runProjectCompile,
+		func(docURI protocol.DocumentURI, diags []protocol.Diagnostic) {
+			srv.diagStore.set(docURI, diagSourceCompile, diags)
+		},
+		srv.stopDiagProcess,
+		srv.startCompileProgress,
+		srv.debugf,
+	)
+
+	return srv
 }
 
 type stdinoutCloser struct {
@@ -400,8 +434,11 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 		s.watchGitHead()
 	}
 
-	if params.Capabilities.Window != nil && params.Capabilities.Window.ShowDocument != nil {
-		s.showDocumentSupported = params.Capabilities.Window.ShowDocument.Support
+	if params.Capabilities.Window != nil {
+		if params.Capabilities.Window.ShowDocument != nil {
+			s.showDocumentSupported = params.Capabilities.Window.ShowDocument.Support
+		}
+		s.workDoneProgressSupported = params.Capabilities.Window.WorkDoneProgress
 	}
 	if params.Capabilities.TextDocument != nil && params.Capabilities.TextDocument.Completion != nil &&
 		params.Capabilities.TextDocument.Completion.CompletionItem != nil {
@@ -475,6 +512,9 @@ func (s *Server) Initialized(ctx context.Context, params *protocol.InitializedPa
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.syntax.shutdown()
+	s.diag.shutdown()
+	s.closeDiagBeams()
 	s.closeBeams()
 	return nil
 }
@@ -501,6 +541,8 @@ func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocume
 		}(path, buildRoot)
 	}
 
+	s.scheduleSyntaxCheck(docURI, path, params.TextDocument.Version, params.TextDocument.Text)
+
 	return nil
 }
 
@@ -508,13 +550,27 @@ func (s *Server) DidChange(ctx context.Context, params *protocol.DidChangeTextDo
 	if len(params.ContentChanges) > 0 {
 		// Full sync mode — last change contains the full text
 		text := params.ContentChanges[len(params.ContentChanges)-1].Text
-		s.docs.Set(string(params.TextDocument.URI), text)
+		docURI := string(params.TextDocument.URI)
+		s.docs.Set(docURI, text)
+		s.scheduleSyntaxCheck(docURI, uriToPath(params.TextDocument.URI), params.TextDocument.Version, text)
 	}
 	return nil
 }
 
+// scheduleSyntaxCheck arms a debounced Tier A syntax check for an Elixir buffer.
+// Non-Elixir documents are ignored.
+func (s *Server) scheduleSyntaxCheck(docURI, path string, version int32, text string) {
+	if path == "" || !parser.IsElixirFile(path) {
+		return
+	}
+	buildRoot := s.findBuildRoot(filepath.Dir(path))
+	s.syntax.schedule(docURI, version, text, buildRoot)
+}
+
 func (s *Server) DidClose(ctx context.Context, params *protocol.DidCloseTextDocumentParams) error {
-	s.docs.Close(string(params.TextDocument.URI))
+	docURI := string(params.TextDocument.URI)
+	s.docs.Close(docURI)
+	s.syntax.clear(docURI)
 	return nil
 }
 
@@ -561,6 +617,14 @@ func (s *Server) DidSave(ctx context.Context, params *protocol.DidSaveTextDocume
 			log.Printf("Error indexing %s: %v", path, err)
 		}
 	}()
+
+	// Tier C: compile diagnostics on save of a project .ex file (skip .exs
+	// scripts, deps, and stdlib). Fire-and-forget; never blocks this handler.
+	if s.mixBin != "" && filepath.Ext(path) == ".ex" && s.isProjectFile(path) && !s.isDepsFile(path) {
+		if mixRoot := findMixRoot(filepath.Dir(path)); mixRoot != "" {
+			s.diag.trigger(mixRoot)
+		}
+	}
 
 	return nil
 }

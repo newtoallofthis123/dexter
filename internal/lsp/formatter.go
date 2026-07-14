@@ -1056,20 +1056,13 @@ func (s *Server) publishFormatDiagnostic(uri protocol.DocumentURI, formatErr *Fo
 		})
 	}
 
-	_ = s.client.PublishDiagnostics(context.Background(), &protocol.PublishDiagnosticsParams{
-		URI:         uri,
-		Diagnostics: diagnostics,
-	})
+	// Route through the merged store so a format error doesn't clobber the
+	// document's syntax or compile diagnostics (all three share publishDiagnostics).
+	s.diagStore.set(uri, diagSourceFormat, diagnostics)
 }
 
 func (s *Server) clearFormatDiagnostics(uri protocol.DocumentURI) {
-	if s.client == nil {
-		return
-	}
-	_ = s.client.PublishDiagnostics(context.Background(), &protocol.PublishDiagnosticsParams{
-		URI:         uri,
-		Diagnostics: []protocol.Diagnostic{},
-	})
+	s.diagStore.set(uri, diagSourceFormat, nil)
 }
 
 // computeMinimalEdits returns a minimal set of TextEdits to transform original

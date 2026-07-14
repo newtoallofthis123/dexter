@@ -44,6 +44,12 @@
 # CodeIntel op 4 (runtime_info) payload:
 #   empty
 #
+# CodeIntel op 5 (syntax_check) payload:
+#   4-byte content length (big-endian) + content
+#   Response payload:
+#     1-byte ok flag (1 = parses, 0 = syntax error)
+#     on error: line(u32) + column(u32) + 4-byte message length + message
+#
 # Notification 0 (otp_modules_ready) payload:
 #   2-byte module_count (big-endian) + [name_len(u16) name]
 #
@@ -453,6 +459,7 @@ defmodule Dexter.CodeIntel do
   @op_warm_otp_modules 2
   @op_erlang_exports 3
   @op_runtime_info 4
+  @op_syntax_check 5
 
   def handle_request(op, payload) do
     case op do
@@ -461,8 +468,47 @@ defmodule Dexter.CodeIntel do
       @op_warm_otp_modules -> handle_warm_otp_modules(payload)
       @op_erlang_exports -> handle_erlang_exports(payload)
       @op_runtime_info -> handle_runtime_info(payload)
+      @op_syntax_check -> handle_syntax_check(payload)
       _ -> {1, "unknown code intel op: #{inspect(op)}"}
     end
+  end
+
+  # Parses the buffer with Code.string_to_quoted/2 and reports the first syntax
+  # error (if any). This is pure and stateless — it never loads the project.
+  defp handle_syntax_check(payload) do
+    case payload do
+      <<content_len::unsigned-big-32, content::binary-size(content_len)>> ->
+        case Code.string_to_quoted(content, columns: true, token_metadata: true) do
+          {:ok, _quoted} ->
+            {0, <<1::8>>}
+
+          {:error, {meta, message, token}} ->
+            {line, column} = syntax_line_col(meta)
+            msg = syntax_message(message, token)
+
+            {0,
+             <<0::8, line::unsigned-big-32, column::unsigned-big-32,
+               byte_size(msg)::unsigned-big-32, msg::binary>>}
+        end
+
+      _ ->
+        {1, "invalid syntax_check payload"}
+    end
+  end
+
+  defp syntax_line_col(meta) when is_list(meta) do
+    {Keyword.get(meta, :line, 0), Keyword.get(meta, :column, 0)}
+  end
+
+  defp syntax_line_col(line) when is_integer(line), do: {line, 0}
+  defp syntax_line_col(_), do: {0, 0}
+
+  # string_to_quoted returns the message and a trailing token fragment that,
+  # when present, completes the message (e.g. "unexpected token: " <> "}").
+  defp syntax_message(message, token) do
+    message = to_string(message)
+    token = if token, do: to_string(token), else: ""
+    String.trim(message <> token)
   end
 
   defp handle_erlang_source(payload) do
