@@ -2882,6 +2882,11 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 		symbol    protocol.DocumentSymbol
 		module    string
 		parentIdx int
+		// clauseKey/clauseName support multi-clause disambiguation: when the
+		// same name/arity appears more than once under a parent, the symbol
+		// name is replaced with clauseName (the condensed clause head).
+		clauseKey  string
+		clauseName string
 	}
 
 	type blockFrame struct {
@@ -3041,8 +3046,14 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 			funcName := tokText(tokens[j])
 			nameCol := tokCol(tokens[j])
 			j = nextSig(j + 1)
-			arity, _, _, _ := parser.CollectParams(source, tokens, n, j)
+			arity, _, _, paramsEnd := parser.CollectParams(source, tokens, n, j)
 			nameWithArity := fmt.Sprintf("%s/%d", funcName, arity)
+
+			clauseName := ""
+			if j < n && tokens[j].Kind == parser.TokOpenParen &&
+				paramsEnd > j+1 && paramsEnd <= n && tokens[paramsEnd-1].Kind == parser.TokCloseParen {
+				clauseName = condenseClauseHead(funcName, string(source[tokens[j].Start:tokens[paramsEnd-1].End]))
+			}
 
 			_, nextPos, hasDoBlock := parser.ScanForwardToBlockDo(tokens, n, j)
 
@@ -3066,8 +3077,10 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 						End:   protocol.Position{Line: uint32(lineIdx), Character: uint32(nameCol + len(funcName))},
 					},
 				},
-				module:    curMod,
-				parentIdx: currentParentIdx(),
+				module:     curMod,
+				parentIdx:  currentParentIdx(),
+				clauseKey:  fmt.Sprintf("%d:%s", currentParentIdx(), nameWithArity),
+				clauseName: clauseName,
 			})
 
 			if hasDoBlock {
@@ -3295,6 +3308,21 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 		}
 	}
 
+	// Multi-clause functions all share the same name/arity label; replace
+	// each clause's name with its condensed head so they are distinguishable.
+	clauseCounts := make(map[string]int)
+	for _, e := range entries {
+		if e.clauseKey != "" {
+			clauseCounts[e.clauseKey]++
+		}
+	}
+	for idx := range entries {
+		e := &entries[idx]
+		if e.clauseName != "" && clauseCounts[e.clauseKey] > 1 {
+			e.symbol.Name = e.clauseName
+		}
+	}
+
 	// Build hierarchical tree using parentIdx references.
 	type symNode struct {
 		sym      protocol.DocumentSymbol
@@ -3328,6 +3356,19 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 		result = append(result, buildSymbol(idx))
 	}
 	return result, nil
+}
+
+// condenseClauseHead builds a display name like
+// "handle_call(:get_settings, _from, state)" from a function name and the raw
+// source of its parameter list (parens included), collapsing whitespace and
+// truncating long heads.
+func condenseClauseHead(funcName, params string) string {
+	head := funcName + strings.Join(strings.Fields(params), " ")
+	const maxLen = 80
+	if runes := []rune(head); len(runes) > maxLen {
+		head = string(runes[:maxLen-1]) + "…"
+	}
+	return head
 }
 
 func defKindToSymbolKind(kind string) protocol.SymbolKind {

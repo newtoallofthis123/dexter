@@ -4975,6 +4975,52 @@ end
 	}
 }
 
+func TestDocumentSymbol_MultiClauseHeads(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	content := `defmodule MyApp.Worker do
+  def init(opts), do: {:ok, opts}
+
+  def handle_call(:get_settings, _from, state) do
+    {:reply, state.settings, state}
+  end
+
+  def handle_call({:put_setting, key,
+                   value}, _from, state) do
+    {:reply, :ok, put_in(state.settings[key], value)}
+  end
+
+  def handle_cast(:reset, state), do: {:noreply, %{state | settings: %{}}}
+end
+`
+	docURI := "file:///test/multi_clause.ex"
+	server.docs.Set(docURI, content)
+
+	symbols := documentSymbols(t, server, docURI)
+	mod := symbols[0]
+	names := collectNames(mod.Children)
+
+	expected := []string{
+		"init/1",
+		"handle_call(:get_settings, _from, state)",
+		"handle_call({:put_setting, key, value}, _from, state)",
+		"handle_cast/2",
+	}
+	for _, want := range expected {
+		found := false
+		for _, got := range names {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing expected symbol %q, got %v", want, names)
+		}
+	}
+}
+
 func TestDocumentSymbol_ForReduceDoesNotAddDepth(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
