@@ -301,6 +301,190 @@ func isExprChar(b byte) bool {
 	return unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '.' || c == '?' || c == '!'
 }
 
+// StructVarModule resolves a lowercase variable named varName to the struct
+// module it is bound to, by scanning the enclosing def/defp clause backward from
+// the cursor for the nearest binding of one of these shapes:
+//
+//	%Mod{...} = var        (match, incl. function-head params)
+//	var = %Mod{...}        (assignment)
+//
+// The returned module reference is unresolved (as written); callers resolve it
+// through aliases. Returns ("", false) if no binding is found.
+func (tf *TokenizedFile) StructVarModule(line, col int, varName string) (string, bool) {
+	tokens, source, n := tf.tokens, tf.source, tf.n
+	cursorOffset := parser.LineColToOffset(tf.lineStarts, line, col)
+	if cursorOffset < 0 {
+		return "", false
+	}
+
+	result := ""
+	found := false
+	for i := 0; i < n && tokens[i].Start < cursorOffset; i++ {
+		switch tokens[i].Kind {
+		// A new def/defp clause starts a fresh scope: discard earlier bindings.
+		case parser.TokDef, parser.TokDefp, parser.TokDefmacro, parser.TokDefmacrop:
+			result, found = "", false
+
+		case parser.TokPercent:
+			j := i + 1
+			if j >= n || tokens[j].Kind != parser.TokModule {
+				continue
+			}
+			modName, k := parser.CollectModuleName(source, tokens, n, j)
+			if modName == "" || k >= n || tokens[k].Kind != parser.TokOpenBrace {
+				continue
+			}
+			closeIdx := matchCloseBrace(tokens, n, k)
+			if closeIdx < 0 {
+				continue
+			}
+
+			// Pattern: %Mod{...} = varName
+			if a := tokNextSig(tokens, n, closeIdx+1); a < n && isEqualsToken(source, tokens[a]) {
+				if b := tokNextSig(tokens, n, a+1); b < n && tokens[b].Kind == parser.TokIdent &&
+					tokens[b].Start < cursorOffset && parser.TokenText(source, tokens[b]) == varName {
+					result, found = modName, true
+				}
+			}
+			// Pattern: varName = %Mod{...}
+			if p := prevSigToken(tokens, i-1); p >= 0 && isEqualsToken(source, tokens[p]) {
+				if q := prevSigToken(tokens, p-1); q >= 0 && tokens[q].Kind == parser.TokIdent &&
+					parser.TokenText(source, tokens[q]) == varName {
+					result, found = modName, true
+				}
+			}
+		}
+	}
+	return result, found
+}
+
+// StructLiteralContext detects whether the cursor sits inside an unclosed struct
+// literal `%Mod{ ... }`. On success it returns the (unresolved) module reference,
+// the field-name prefix being typed at the cursor, and the field keys already
+// present in the literal before the cursor (to exclude from completion).
+func (tf *TokenizedFile) StructLiteralContext(line, col int) (moduleRef, fieldPrefix string, present []string, ok bool) {
+	tokens, source, n := tf.tokens, tf.source, tf.n
+	cursorOffset := parser.LineColToOffset(tf.lineStarts, line, col)
+	if cursorOffset < 0 {
+		return "", "", nil, false
+	}
+
+	last := -1
+	for i := 0; i < n && tokens[i].Start < cursorOffset; i++ {
+		last = i
+	}
+	if last < 0 {
+		return "", "", nil, false
+	}
+
+	// Walk backward to the nearest '{' that is still open at the cursor.
+	depth := 0
+	openIdx := -1
+	for i := last; i >= 0; i-- {
+		switch tokens[i].Kind {
+		case parser.TokCloseBrace:
+			depth++
+		case parser.TokOpenBrace:
+			if depth == 0 {
+				openIdx = i
+			} else {
+				depth--
+			}
+		}
+		if openIdx >= 0 {
+			break
+		}
+	}
+	if openIdx < 1 {
+		return "", "", nil, false
+	}
+
+	// The '{' must be preceded by a module chain, itself preceded by '%'.
+	chainEnd := openIdx - 1
+	if tokens[chainEnd].Kind != parser.TokModule {
+		return "", "", nil, false
+	}
+	chainStart := chainEnd
+	for chainStart-2 >= 0 && tokens[chainStart-1].Kind == parser.TokDot && tokens[chainStart-2].Kind == parser.TokModule {
+		chainStart -= 2
+	}
+	if chainStart < 1 || tokens[chainStart-1].Kind != parser.TokPercent {
+		return "", "", nil, false
+	}
+	modName, _ := parser.CollectModuleName(source, tokens, n, chainStart)
+	if modName == "" {
+		return "", "", nil, false
+	}
+
+	// Walk the literal body, tracking whether the cursor is at a key position
+	// (start of an entry) or a value position (after `key:`). Only key positions
+	// get field completion. Collect keys already present to exclude them.
+	inValue := false
+	d := 0
+	for i := openIdx + 1; i <= last; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenBrace, parser.TokOpenBracket, parser.TokOpenParen:
+			d++
+		case parser.TokCloseBrace, parser.TokCloseBracket, parser.TokCloseParen:
+			d--
+		case parser.TokColon:
+			if d == 0 {
+				inValue = true
+			}
+		case parser.TokComma:
+			if d == 0 {
+				inValue = false
+			}
+		case parser.TokIdent:
+			if d == 0 && !inValue && i+1 <= last && tokens[i+1].Kind == parser.TokColon {
+				present = append(present, parser.TokenText(source, tokens[i]))
+			}
+		}
+	}
+	if inValue {
+		return "", "", nil, false
+	}
+
+	// A bare identifier straddling the cursor is the field prefix being typed.
+	if t := tokens[last]; t.Kind == parser.TokIdent && t.Start < cursorOffset && t.End >= cursorOffset &&
+		!(last+1 < n && tokens[last+1].Kind == parser.TokColon) {
+		fieldPrefix = string(source[t.Start:cursorOffset])
+	}
+
+	return modName, fieldPrefix, present, true
+}
+
+// matchCloseBrace returns the index of the '}' matching the '{' at open, or -1.
+func matchCloseBrace(tokens []parser.Token, n, open int) int {
+	depth := 0
+	for i := open; i < n; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenBrace:
+			depth++
+		case parser.TokCloseBrace:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// prevSigToken returns the index of the nearest significant token at or before
+// from (skipping EOL/comment tokens), or -1.
+func prevSigToken(tokens []parser.Token, from int) int {
+	for from >= 0 && (tokens[from].Kind == parser.TokEOL || tokens[from].Kind == parser.TokComment) {
+		from--
+	}
+	return from
+}
+
+// isEqualsToken reports whether t is a bare '=' match/assignment operator.
+func isEqualsToken(source []byte, t parser.Token) bool {
+	return t.Kind == parser.TokOther && t.End-t.Start == 1 && source[t.Start] == '='
+}
+
 // CursorContext holds the result of token-based expression extraction at a
 // cursor position. It replaces the combination of ExtractExpression +
 // ExtractModuleAndFunction with a single token-aware lookup.

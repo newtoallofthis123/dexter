@@ -365,6 +365,7 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 					Line:     tok.Line,
 					FilePath: path,
 					Kind:     "defstruct",
+					Params:   CollectStructFields(source, tokens, n, i+1),
 				})
 			}
 			i++
@@ -379,6 +380,7 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 					Line:     tok.Line,
 					FilePath: path,
 					Kind:     "defexception",
+					Params:   CollectStructFields(source, tokens, n, i+1),
 				})
 			}
 			i++
@@ -915,4 +917,93 @@ func FixParamNames(names []string) []string {
 		}
 	}
 	return names
+}
+
+// CollectStructFields extracts the field names declared by a defstruct or
+// defexception, starting at the token index just after the keyword. It handles
+// the literal forms `[:a, :b]`, `a: 1, b: nil`, `[a: 1, b: nil]`, and mixed
+// `[:a, b: 1]`, joining the names (without leading colons) comma-separated.
+// Dynamic forms such as `defstruct @attrs` or a function call yield "" since
+// the fields are not statically known. The declaration may span multiple lines.
+func CollectStructFields(source []byte, tokens []Token, n, from int) string {
+	i := NextSigToken(tokens, n, from)
+	if i >= n {
+		return ""
+	}
+
+	// A leading bracket wraps the field list; without it the fields are a bare
+	// keyword list. elementDepth is the bracket depth at which field entries live.
+	elementDepth := 0
+	if tokens[i].Kind == TokOpenBracket {
+		elementDepth = 1
+		i++
+	}
+
+	var fields []string
+	depth := elementDepth
+	atElementStart := true // true at the first token of a list entry
+
+	for i < n {
+		tok := tokens[i]
+		switch tok.Kind {
+		case TokEOL, TokComment:
+			// A bare keyword list ends at the newline unless the previous entry
+			// left a trailing comma (atElementStart) signalling continuation.
+			if elementDepth == 0 && depth == 0 && !atElementStart {
+				return strings.Join(fields, ",")
+			}
+		case TokOpenParen, TokOpenBracket, TokOpenBrace, TokOpenAngle:
+			depth++
+			atElementStart = false
+		case TokCloseAngle:
+			depth--
+			atElementStart = false
+		case TokCloseParen, TokCloseBracket, TokCloseBrace:
+			depth--
+			if depth < elementDepth {
+				return strings.Join(fields, ",")
+			}
+			atElementStart = false
+		case TokComma:
+			if depth == elementDepth {
+				atElementStart = true
+			}
+		case TokAtom:
+			if depth == elementDepth && atElementStart {
+				if name := structFieldName(source[tok.Start:tok.End]); name != "" {
+					fields = append(fields, name)
+				}
+			}
+			atElementStart = false
+		case TokIdent:
+			if depth == elementDepth && atElementStart &&
+				i+1 < n && tokens[i+1].Kind == TokColon {
+				fields = append(fields, string(source[tok.Start:tok.End]))
+			}
+			atElementStart = false
+		default:
+			atElementStart = false
+		}
+		i++
+	}
+	return strings.Join(fields, ",")
+}
+
+// structFieldName returns the field name for a bare atom token like `:name`,
+// or "" if the atom is quoted or otherwise not a simple identifier.
+func structFieldName(atom []byte) string {
+	if len(atom) < 2 || atom[0] != ':' {
+		return ""
+	}
+	name := atom[1:]
+	c := name[0]
+	if c != '_' && !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') {
+		return ""
+	}
+	for _, b := range name[1:] {
+		if b != '_' && !(b >= 'a' && b <= 'z') && !(b >= 'A' && b <= 'Z') && !(b >= '0' && b <= '9') {
+			return ""
+		}
+	}
+	return string(name)
 }

@@ -1493,6 +1493,22 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		}, nil
 	}
 
+	// Inside a struct literal `%Mod{ ... }`: complete the module's field names as
+	// keyword keys, excluding fields already present.
+	if modRef, fieldPrefix, present, inLiteral := tf.StructLiteralContext(lineNum, col); inLiteral {
+		aliases := tf.ExtractAliases()
+		s.mergeAliasesFromUseTokenized(tf, aliases)
+		resolved := tf.ResolveModuleExpr(resolveModule(modRef, aliases), lineNum)
+		exclude := make(map[string]bool, len(present))
+		for _, p := range present {
+			exclude[p] = true
+		}
+		if fieldItems := s.structFieldCompletions(resolved, fieldPrefix, exclude, true); fieldItems != nil {
+			return &protocol.CompletionList{Items: fieldItems}, nil
+		}
+		return nil, nil
+	}
+
 	if prefix == "" && !afterDot {
 		return nil, nil
 	}
@@ -1567,6 +1583,18 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 	}
 
 	moduleRef, funcPrefix := ExtractModuleAndFunction(prefix)
+
+	// "var." where var is bound to a %Mod{} struct — complete the struct's fields.
+	if afterDot && moduleRef == "" && funcPrefix != "" && !strings.Contains(prefix, ".") {
+		if modRef, ok := tf.StructVarModule(lineNum, col, funcPrefix); ok {
+			aliases := tf.ExtractAliases()
+			s.mergeAliasesFromUseTokenized(tf, aliases)
+			resolved := tf.ResolveModuleExpr(resolveModule(modRef, aliases), lineNum)
+			if fieldItems := s.structFieldCompletions(resolved, "", nil, false); fieldItems != nil {
+				return &protocol.CompletionList{Items: fieldItems}, nil
+			}
+		}
+	}
 
 	// "Module.func." or "variable." — dot after a function call result or
 	// map/struct field access. We have no type info to complete the result.
@@ -2380,6 +2408,37 @@ var doBlockSnippets = map[string]string{
 	"setup":        "setup do\n\t$0\nend",
 	"setup_all":    "setup_all do\n\t$0\nend",
 	"assert_raise": "assert_raise ${1:exception} do\n\t$0\nend",
+}
+
+// structFieldCompletions builds field completion items for the given struct
+// module. fieldPrefix filters by prefix; exclude drops already-present fields.
+// When keyword is true the items insert `field: ` (struct-literal keys);
+// otherwise they insert the bare field name (dot access). Returns nil when the
+// module has no statically known fields.
+func (s *Server) structFieldCompletions(module, fieldPrefix string, exclude map[string]bool, keyword bool) []protocol.CompletionItem {
+	fields, err := s.store.LookupStructFields(module)
+	if err != nil || len(fields) == 0 {
+		return nil
+	}
+	var items []protocol.CompletionItem
+	for _, f := range fields {
+		if exclude[f] {
+			continue
+		}
+		if fieldPrefix != "" && !strings.HasPrefix(f, fieldPrefix) {
+			continue
+		}
+		item := protocol.CompletionItem{
+			Label:  f,
+			Kind:   protocol.CompletionItemKindField,
+			Detail: module,
+		}
+		if keyword {
+			item.InsertText = f + ": "
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func applySnippet(item *protocol.CompletionItem, name string, arity int, params string, kind string, inPipe bool, useSnippets bool) {

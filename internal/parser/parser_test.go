@@ -931,6 +931,66 @@ end
 	}
 }
 
+func TestParseFile_DefstructFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string // expected comma-joined Params on the __struct__ def
+	}{
+		{"atom list", `defstruct [:name, :email, :role]`, "name,email,role"},
+		{"keyword no brackets", `defstruct name: nil, age: 0`, "name,age"},
+		{"keyword with brackets", `defstruct [status: :active, count: 0]`, "status,count"},
+		{"mixed", `defstruct [:name, age: 18]`, "name,age"},
+		{"atom value not captured", `defstruct status: :active, kind: :basic`, "status,kind"},
+		{"multiline", "defstruct [\n  :a,\n  :b,\n  c: 1\n]", "a,b,c"},
+		{"dynamic module attr", `defstruct @fields`, ""},
+		{"dynamic call", `defstruct Enum.map([:a], & &1)`, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "defmodule MyApp.S do\n  " + tc.body + "\nend\n"
+			defs, _, err := ParseText("s.ex", text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			found := false
+			for _, d := range defs {
+				if d.Kind == "defstruct" && d.Function == "__struct__" {
+					got = d.Params
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("no __struct__ definition emitted")
+			}
+			if got != tc.want {
+				t.Errorf("fields = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseFile_DefexceptionFields(t *testing.T) {
+	defs, _, err := ParseText("e.ex", `defmodule MyApp.Err do
+  defexception [:message, :plug_status]
+end
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, d := range defs {
+		if d.Kind == "defexception" && d.Function == "__exception__" {
+			got = d.Params
+		}
+	}
+	if got != "message,plug_status" {
+		t.Errorf("exception fields = %q, want %q", got, "message,plug_status")
+	}
+}
+
 func TestParseFile_WhenGuards(t *testing.T) {
 	path := writeTempFile(t, `defmodule MyApp.Validators do
   def validate(x) when is_integer(x) and x > 0 do

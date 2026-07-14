@@ -326,6 +326,14 @@ func completionAt(t *testing.T, server *Server, uri string, line, col uint32) []
 	return result.Items
 }
 
+func labels(items []protocol.CompletionItem) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.Label
+	}
+	return out
+}
+
 func hasCompletionItem(items []protocol.CompletionItem, label string) bool {
 	for _, item := range items {
 		if item.Label == label || item.FilterText == label {
@@ -1347,6 +1355,109 @@ end`)
 	items := completionAt(t, server, uri, 2, 6)
 	if !hasCompletionItem(items, "user_data") {
 		t.Error("expected function param 'user_data' in completions")
+	}
+}
+
+func TestCompletion_StructFieldsViaFunctionHead(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/state.ex", `defmodule MyApp.State do
+  defstruct [:count, :name]
+end
+`)
+
+	uri := "file:///worker.ex"
+	server.docs.Set(uri, `defmodule MyApp.Worker do
+  alias MyApp.State
+
+  def do_the_thing(%State{} = state) do
+    state.
+  end
+end`)
+
+	items := completionAt(t, server, uri, 4, 10)
+	if !hasCompletionItem(items, "count") || !hasCompletionItem(items, "name") {
+		t.Errorf("expected struct fields count/name, got %v", labels(items))
+	}
+	for _, item := range items {
+		if item.Label == "count" && item.Kind != protocol.CompletionItemKindField {
+			t.Errorf("expected Field kind for struct field, got %v", item.Kind)
+		}
+	}
+}
+
+func TestCompletion_StructFieldsViaAssignment(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/state.ex", `defmodule MyApp.State do
+  defstruct [:count, :name]
+end
+`)
+
+	uri := "file:///worker.ex"
+	server.docs.Set(uri, `defmodule MyApp.Worker do
+  alias MyApp.State
+
+  def run(x) do
+    state = %State{}
+    state.
+  end
+end`)
+
+	items := completionAt(t, server, uri, 5, 10)
+	if !hasCompletionItem(items, "count") || !hasCompletionItem(items, "name") {
+		t.Errorf("expected struct fields count/name, got %v", labels(items))
+	}
+}
+
+func TestCompletion_StructLiteralFields(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/state.ex", `defmodule MyApp.State do
+  defstruct [:count, :name, :active]
+end
+`)
+
+	uri := "file:///worker.ex"
+
+	// Empty literal: all fields offered as keyword keys.
+	server.docs.Set(uri, "defmodule W do\n  alias MyApp.State\n  def f, do: %State{")
+	items := completionAt(t, server, uri, 2, 20)
+	if !hasCompletionItem(items, "count") || !hasCompletionItem(items, "active") {
+		t.Errorf("expected all fields in empty literal, got %v", labels(items))
+	}
+	for _, item := range items {
+		if item.Label == "count" {
+			if item.InsertText != "count: " {
+				t.Errorf("expected keyword insert text 'count: ', got %q", item.InsertText)
+			}
+			if item.Kind != protocol.CompletionItemKindField {
+				t.Errorf("expected Field kind, got %v", item.Kind)
+			}
+		}
+	}
+
+	// Prefix filtering: only fields starting with "ac".
+	server.docs.Set(uri, "defmodule W do\n  alias MyApp.State\n  def f, do: %State{ac")
+	items = completionAt(t, server, uri, 2, 22)
+	if !hasCompletionItem(items, "active") {
+		t.Errorf("expected 'active' for prefix 'ac', got %v", labels(items))
+	}
+	if hasCompletionItem(items, "count") || hasCompletionItem(items, "name") {
+		t.Errorf("expected only prefix matches, got %v", labels(items))
+	}
+
+	// Already-present fields are excluded.
+	server.docs.Set(uri, "defmodule W do\n  alias MyApp.State\n  def f, do: %State{count: 1, ")
+	items = completionAt(t, server, uri, 2, 30)
+	if hasCompletionItem(items, "count") {
+		t.Errorf("expected 'count' excluded (already present), got %v", labels(items))
+	}
+	if !hasCompletionItem(items, "name") || !hasCompletionItem(items, "active") {
+		t.Errorf("expected remaining fields name/active, got %v", labels(items))
 	}
 }
 

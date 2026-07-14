@@ -755,6 +755,27 @@ func (s *Store) LookupFunction(module, function string) ([]LookupResult, error) 
 	)
 }
 
+// LookupStructFields returns the field names declared by the given module's
+// defstruct/defexception, in declaration order. Returns nil if the module has
+// no struct definition or its fields could not be determined statically.
+func (s *Store) LookupStructFields(module string) ([]string, error) {
+	var params string
+	err := s.db.QueryRow(
+		"SELECT params FROM definitions WHERE module = ? AND function IN ('__struct__', '__exception__') AND kind IN ('defstruct', 'defexception') LIMIT 1",
+		module,
+	).Scan(&params)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if params == "" {
+		return nil, nil
+	}
+	return strings.Split(params, ","), nil
+}
+
 // CallbackResult holds a @callback or @macrocallback definition with its arity.
 type CallbackResult struct {
 	FilePath string
