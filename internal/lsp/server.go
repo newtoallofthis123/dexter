@@ -157,6 +157,15 @@ func NewServer(s *store.Store, projectRoot string) *Server {
 		},
 		srv.stopDiagProcess,
 		srv.startCompileProgress,
+		func(msg string) {
+			if srv.client == nil {
+				return
+			}
+			_ = srv.client.ShowMessage(context.Background(), &protocol.ShowMessageParams{
+				Type:    protocol.MessageTypeWarning,
+				Message: msg,
+			})
+		},
 		srv.debugf,
 	)
 
@@ -620,8 +629,10 @@ func (s *Server) DidSave(ctx context.Context, params *protocol.DidSaveTextDocume
 
 	// Tier C: compile diagnostics on save of a project .ex file (skip .exs
 	// scripts, deps, and stdlib). Fire-and-forget; never blocks this handler.
+	s.debugf("DidSave: path=%s mixBin=%q ext=%s project=%v deps=%v", path, s.mixBin, filepath.Ext(path), s.isProjectFile(path), s.isDepsFile(path))
 	if s.mixBin != "" && filepath.Ext(path) == ".ex" && s.isProjectFile(path) && !s.isDepsFile(path) {
 		if mixRoot := findMixRoot(filepath.Dir(path)); mixRoot != "" {
+			s.debugf("DidSave: triggering compile for %s", mixRoot)
 			s.diag.trigger(mixRoot)
 		}
 	}

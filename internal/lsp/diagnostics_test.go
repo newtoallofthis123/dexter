@@ -193,7 +193,7 @@ func TestDiagManagerPublishDiffClearsFixedFiles(t *testing.T) {
 		return <-round, nil
 	}
 
-	m := newDiagManager(compile, setFn, nil, nil, func(string, ...interface{}) {})
+	m := newDiagManager(compile, setFn, nil, nil, nil, func(string, ...interface{}) {})
 	m.idle = 0
 
 	// Round 1: both files have a warning.
@@ -227,7 +227,7 @@ func TestDiagManagerSingleFlightCoalesces(t *testing.T) {
 		return nil, nil
 	}
 
-	m := newDiagManager(compile, func(protocol.DocumentURI, []protocol.Diagnostic) {}, nil, nil, func(string, ...interface{}) {})
+	m := newDiagManager(compile, func(protocol.DocumentURI, []protocol.Diagnostic) {}, nil, nil, nil, func(string, ...interface{}) {})
 	m.idle = 0
 
 	m.trigger("/proj")

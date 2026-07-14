@@ -40,7 +40,10 @@ const (
 
 	syntaxDebounce     = 250 * time.Millisecond
 	diagCompileTimeout = 120 * time.Second
-	diagIdleTimeout    = 30 * time.Minute
+	// Cold compiles build the project (and its deps) into an empty
+	// .dexter/build; on large projects that legitimately takes many minutes.
+	diagColdCompileTimeout = 20 * time.Minute
+	diagIdleTimeout        = 30 * time.Minute
 )
 
 // diagPublishOrder fixes the order sources are flattened in so published
@@ -297,6 +300,7 @@ type diagProject struct {
 	compiling bool
 	dirty     bool
 	cold      bool // true until the first successful compile completes
+	notified  bool // a failure notification was shown; reset on success
 	lastFiles map[protocol.DocumentURI]bool
 	idleTimer *time.Timer
 }
@@ -306,8 +310,10 @@ type diagManager struct {
 	setCompileDiags func(docURI protocol.DocumentURI, diags []protocol.Diagnostic)
 	kill            func(root string) // release the project's process (nil ok)
 	onCold          func(root string) func()
+	notify          func(msg string) // user-visible failure notice (nil ok)
 	debugf          func(string, ...interface{})
 	timeout         time.Duration
+	coldTimeout     time.Duration
 	idle            time.Duration
 
 	mu       sync.Mutex
@@ -320,6 +326,7 @@ func newDiagManager(
 	setCompileDiags func(docURI protocol.DocumentURI, diags []protocol.Diagnostic),
 	kill func(root string),
 	onCold func(root string) func(),
+	notify func(msg string),
 	debugf func(string, ...interface{}),
 ) *diagManager {
 	return &diagManager{
@@ -327,8 +334,10 @@ func newDiagManager(
 		setCompileDiags: setCompileDiags,
 		kill:            kill,
 		onCold:          onCold,
+		notify:          notify,
 		debugf:          debugf,
 		timeout:         diagCompileTimeout,
+		coldTimeout:     diagColdCompileTimeout,
 		idle:            diagIdleTimeout,
 		projects:        make(map[string]*diagProject),
 	}
@@ -371,7 +380,11 @@ func (m *diagManager) run(root string, p *diagProject) {
 			endProgress = m.onCold(root)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
+		timeout := m.timeout
+		if cold {
+			timeout = m.coldTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		diags, err := m.compile(ctx, root)
 		cancel()
 
@@ -381,8 +394,16 @@ func (m *diagManager) run(root string, p *diagProject) {
 
 		if err != nil {
 			// Timeout or crash: drop the round and release the process so the
-			// next save starts a fresh one.
+			// next save starts a fresh one. Tell the user once — silent failure
+			// looks like diagnostics simply don't work.
 			m.debugf("diagnostics: compile failed for %s: %v", root, err)
+			m.mu.Lock()
+			firstFailure := !p.notified
+			p.notified = true
+			m.mu.Unlock()
+			if firstFailure && m.notify != nil {
+				m.notify(fmt.Sprintf("dexter: compile diagnostics for %s failed: %v", filepath.Base(root), err))
+			}
 			if m.kill != nil {
 				m.kill(root)
 			}
@@ -390,6 +411,7 @@ func (m *diagManager) run(root string, p *diagProject) {
 			m.publishResult(root, p, diags)
 			m.mu.Lock()
 			p.cold = false
+			p.notified = false
 			m.mu.Unlock()
 		}
 
@@ -752,7 +774,32 @@ func (s *Server) startCompileProgress(root string) func() {
 		},
 	})
 
+	// Cold compiles can run for minutes; report elapsed time so the progress
+	// UI visibly stays alive instead of looking hung.
+	started := time.Now()
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				elapsed := time.Since(started).Round(time.Second)
+				_ = s.client.Progress(ctx, &protocol.ProgressParams{
+					Token: *token,
+					Value: &protocol.WorkDoneProgressReport{
+						Kind:    protocol.WorkDoneProgressKindReport,
+						Message: fmt.Sprintf("cold build, %s elapsed", elapsed),
+					},
+				})
+			}
+		}
+	}()
+
 	return func() {
+		close(stop)
 		_ = s.client.Progress(ctx, &protocol.ProgressParams{
 			Token: *token,
 			Value: &protocol.WorkDoneProgressEnd{Kind: protocol.WorkDoneProgressKindEnd},
