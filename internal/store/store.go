@@ -687,6 +687,7 @@ type LookupResult struct {
 	Arity      int
 	DelegateTo string
 	DelegateAs string
+	Head       string // populated only by LookupFunctionClauses
 }
 
 func (s *Store) LookupModule(module string) ([]LookupResult, error) {
@@ -753,6 +754,31 @@ func (s *Store) LookupFunction(module, function string) ([]LookupResult, error) 
 		"SELECT file_path, line, kind, arity, delegate_to, delegate_as FROM definitions WHERE module = ? AND function = ? AND kind NOT IN ('module', 'defprotocol', 'defimpl', 'callback', 'macrocallback') ORDER BY CASE WHEN kind IN ('type', 'opaque') THEN 1 ELSE 0 END, line",
 		module, function,
 	)
+}
+
+// LookupFunctionClauses returns the clauses of a function like LookupFunction,
+// but additionally populates the Head field of each result (the condensed clause
+// head text). Used by GenServer message navigation to match a call's message
+// against each handle_call/handle_cast clause's pattern.
+func (s *Store) LookupFunctionClauses(module, function string) ([]LookupResult, error) {
+	rows, err := s.db.Query(
+		"SELECT file_path, line, kind, arity, delegate_to, delegate_as, head FROM definitions WHERE module = ? AND function = ? AND kind NOT IN ('module', 'defprotocol', 'defimpl', 'callback', 'macrocallback') ORDER BY line",
+		module, function,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []LookupResult
+	for rows.Next() {
+		var r LookupResult
+		if err := rows.Scan(&r.FilePath, &r.Line, &r.Kind, &r.Arity, &r.DelegateTo, &r.DelegateAs, &r.Head); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
 }
 
 // LookupStructFields returns the field names declared by the given module's

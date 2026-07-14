@@ -625,6 +625,13 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		return nil, nil
 	}
 
+	// GenServer.call/cast message → matching handle_call/handle_cast clause.
+	// Runs before expression resolution because the cursor may sit on an atom
+	// or tuple literal that is not a resolvable expression on its own.
+	if locs := s.genServerCallDefinition(tf, params.TextDocument.URI, lineNum, col); len(locs) > 0 {
+		return locs, nil
+	}
+
 	exprCtx := tf.ExpressionAtCursor(lineNum, col)
 	if exprCtx.Empty() {
 		return nil, nil
@@ -750,6 +757,58 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		return nil, nil
 	}
 	return storeResultsToLocations(results), nil
+}
+
+// genServerCallDefinition implements go-to-definition from a GenServer.call/cast
+// message argument to the matching handle_call/handle_cast clause. It returns
+// nil (letting normal resolution proceed) whenever the feature does not engage.
+func (s *Server) genServerCallDefinition(tf *TokenizedFile, docURI protocol.DocumentURI, lineNum, col int) []protocol.Location {
+	gc, ok := tf.GenServerCallContext(lineNum, col)
+	if !ok || gc.msgKey == "" {
+		return nil
+	}
+
+	filePath := uriToPath(docURI)
+	var module string
+	if gc.targetRef == "" {
+		// __MODULE__, a pid, or a via tuple → the enclosing module.
+		module = extractEnclosingModuleFromTokens(tf.source, tf.tokens, lineNum)
+		if module == "" {
+			module = tf.FirstDefmodule()
+		}
+	} else {
+		aliases := tf.ExtractAliasesInScope(lineNum)
+		s.mergeAliasesFromUseTokenized(tf, aliases)
+		module = s.resolveModuleWithNesting(gc.targetRef, aliases, filePath, lineNum)
+	}
+	if module == "" {
+		return nil
+	}
+
+	clauses, err := s.store.LookupFunctionClauses(module, gc.kind)
+	if err != nil || len(clauses) == 0 {
+		return nil
+	}
+
+	var exact, wildcard []store.LookupResult
+	for _, c := range clauses {
+		key, isWild, keyOK := clausePatternKey(c.Head)
+		if !keyOK {
+			continue
+		}
+		if isWild {
+			wildcard = append(wildcard, c)
+		} else if key == gc.msgKey {
+			exact = append(exact, c)
+		}
+	}
+	if len(exact) > 0 {
+		return storeResultsToLocations(exact)
+	}
+	if len(wildcard) > 0 {
+		return storeResultsToLocations(wildcard)
+	}
+	return nil
 }
 
 func storeResultsToLocations(results []store.LookupResult) []protocol.Location {
@@ -3931,6 +3990,14 @@ func (s *Server) References(ctx context.Context, params *protocol.ReferenceParam
 		tf = NewTokenizedFile(text)
 	}
 
+	// GenServer handle_call/handle_cast clause head → GenServer.call/cast sites
+	// whose message matches this clause's pattern. Runs before expression
+	// resolution because the cursor may sit on the clause's atom/tuple pattern.
+	if locs, engaged := s.genServerClauseReferences(tf, params.TextDocument.URI, lineNum, col); engaged {
+		s.debugf("References: GenServer clause matched %d call site(s)", len(locs))
+		return locs, nil
+	}
+
 	cursorCtx := tf.ExpressionAtCursor(lineNum, col)
 	if cursorCtx.Empty() {
 		s.debugf("References: no expression at cursor")
@@ -4167,6 +4234,81 @@ func (s *Server) References(ctx context.Context, params *protocol.ReferenceParam
 
 	s.debugf("References: returning %d locations", len(locations))
 	return locations, nil
+}
+
+// genServerClauseReferences implements references from a handle_call/handle_cast
+// clause head to the GenServer.call/cast sites whose message matches the
+// clause's concrete-atom pattern and whose target module resolves to the
+// clause's module. The bool reports whether the feature engaged (the caller
+// returns the locations directly in that case).
+func (s *Server) genServerClauseReferences(tf *TokenizedFile, docURI protocol.DocumentURI, lineNum, col int) ([]protocol.Location, bool) {
+	kind, key, ok := tf.GenServerClauseAt(lineNum, col)
+	if !ok {
+		return nil, false
+	}
+
+	module := extractEnclosingModuleFromTokens(tf.source, tf.tokens, lineNum)
+	if module == "" {
+		module = tf.FirstDefmodule()
+	}
+	if module == "" {
+		return nil, false
+	}
+
+	clientFn := "call"
+	if kind == "handle_cast" {
+		clientFn = "cast"
+	}
+	refs, err := s.store.LookupReferences("GenServer", clientFn)
+	if err != nil {
+		return nil, true
+	}
+
+	type refKey struct {
+		filePath string
+		line     int
+	}
+	seen := make(map[refKey]struct{}, len(refs))
+	var locations []protocol.Location
+
+	for _, r := range refs {
+		fileURI := string(uri.File(r.FilePath))
+		text, ok := s.docs.GetOrLoad(fileURI)
+		if !ok {
+			continue
+		}
+		rtf := NewTokenizedFile(text)
+		gc, ok := rtf.GenServerCallOnLine(r.Line)
+		if !ok || gc.msgKey != key {
+			continue
+		}
+
+		var targetMod string
+		if gc.targetRef == "" {
+			targetMod = extractEnclosingModuleFromTokens(rtf.source, rtf.tokens, r.Line-1)
+			if targetMod == "" {
+				targetMod = rtf.FirstDefmodule()
+			}
+		} else {
+			aliases := rtf.ExtractAliasesInScope(r.Line - 1)
+			s.mergeAliasesFromUseTokenized(rtf, aliases)
+			targetMod = s.resolveModuleWithNesting(gc.targetRef, aliases, r.FilePath, r.Line-1)
+		}
+		if targetMod != module {
+			continue
+		}
+
+		k := refKey{r.FilePath, r.Line}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		locations = append(locations, protocol.Location{
+			URI:   uri.File(r.FilePath),
+			Range: lineRange(r.Line - 1),
+		})
+	}
+	return locations, true
 }
 
 func (s *Server) Rename(ctx context.Context, params *protocol.RenameParams) (*protocol.WorkspaceEdit, error) {

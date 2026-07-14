@@ -454,6 +454,342 @@ func (tf *TokenizedFile) StructLiteralContext(line, col int) (moduleRef, fieldPr
 	return modName, fieldPrefix, present, true
 }
 
+// --- GenServer message navigation ------------------------------------------
+//
+// These helpers power go-to-definition from a GenServer.call/cast message to
+// the matching handle_call/handle_cast clause, and references in reverse. They
+// are deliberately heuristic: they engage only on idiomatic
+// `GenServer.call(target, msg)` shapes and fall through cleanly otherwise.
+
+// genServerCall describes a parsed GenServer.call/cast invocation.
+type genServerCall struct {
+	kind      string // "handle_call" or "handle_cast" — the matching server callback
+	targetRef string // arg0 module ref as written; "" for __MODULE__ or a non-module first arg
+	msgKey    string // message key extracted from arg1 (":atom"), or "" if not derivable
+	callLine  int    // 1-based line of the call/cast identifier
+}
+
+// genServerHandler maps a GenServer client function to its server callback.
+func genServerHandler(fn string) (string, bool) {
+	switch fn {
+	case "call":
+		return "handle_call", true
+	case "cast":
+		return "handle_cast", true
+	}
+	return "", false
+}
+
+// parseGenServerCall inspects the argument list whose '(' is at token index
+// openIdx. If it is a literal GenServer.call/cast call with at least two
+// arguments it returns the parsed call and true.
+func parseGenServerCall(source []byte, tokens []parser.Token, n, openIdx int) (genServerCall, bool) {
+	var gc genServerCall
+	if openIdx < 0 || openIdx >= n || tokens[openIdx].Kind != parser.TokOpenParen {
+		return gc, false
+	}
+
+	// The identifier before '(' must be call/cast, itself preceded by a '.' and
+	// a module chain that is exactly "GenServer".
+	p1 := prevSigToken(tokens, openIdx-1)
+	if p1 < 0 || tokens[p1].Kind != parser.TokIdent {
+		return gc, false
+	}
+	handler, isHandler := genServerHandler(parser.TokenText(source, tokens[p1]))
+	if !isHandler {
+		return gc, false
+	}
+	p2 := prevSigToken(tokens, p1-1)
+	if p2 < 0 || tokens[p2].Kind != parser.TokDot {
+		return gc, false
+	}
+	m := prevSigToken(tokens, p2-1)
+	if m < 0 || tokens[m].Kind != parser.TokModule {
+		return gc, false
+	}
+	chainStart := m
+	for chainStart-2 >= 0 && tokens[chainStart-1].Kind == parser.TokDot && tokens[chainStart-2].Kind == parser.TokModule {
+		chainStart -= 2
+	}
+	if chain, _ := parser.CollectModuleName(source, tokens, n, chainStart); chain != "GenServer" {
+		return gc, false
+	}
+
+	closeIdx := matchCloseParen(tokens, n, openIdx)
+	if closeIdx < 0 {
+		return gc, false
+	}
+	args := splitArgRanges(tokens, openIdx, closeIdx)
+	if len(args) < 2 {
+		return gc, false
+	}
+
+	gc.kind = handler
+	gc.callLine = tokens[p1].Line
+	gc.targetRef = argModuleRef(source, tokens, n, args[0][0], args[0][1])
+	gc.msgKey = messageKeyFromTokens(source, tokens, args[1][0], args[1][1])
+	return gc, true
+}
+
+// GenServerCallContext reports the GenServer.call/cast context when the cursor
+// lies within the message (second) argument of such a call.
+func (tf *TokenizedFile) GenServerCallContext(line, col int) (genServerCall, bool) {
+	tokens, source, n := tf.tokens, tf.source, tf.n
+	cursorOffset := parser.LineColToOffset(tf.lineStarts, line, col)
+	if cursorOffset < 0 {
+		return genServerCall{}, false
+	}
+
+	// Collect open-paren groups that enclose the cursor. Because inner groups
+	// close before outer ones, appending on close order yields innermost-first.
+	var stack, enclosing []int
+	for i := 0; i < n; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenParen:
+			stack = append(stack, i)
+		case parser.TokCloseParen:
+			if len(stack) > 0 {
+				o := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if tokens[o].Start < cursorOffset && cursorOffset < tokens[i].End {
+					enclosing = append(enclosing, o)
+				}
+			}
+		}
+	}
+
+	for _, o := range enclosing {
+		gc, ok := parseGenServerCall(source, tokens, n, o)
+		if !ok {
+			continue
+		}
+		// Only engage when the cursor is within the message argument; on the
+		// target or timeout argument, defer to normal resolution.
+		closeIdx := matchCloseParen(tokens, n, o)
+		args := splitArgRanges(tokens, o, closeIdx)
+		lo, hi := args[1][0], args[1][1]
+		if lo >= hi || cursorOffset < tokens[lo].Start || cursorOffset > tokens[hi-1].End {
+			return genServerCall{}, false
+		}
+		return gc, true
+	}
+	return genServerCall{}, false
+}
+
+// GenServerCallOnLine returns the GenServer.call/cast invocation whose call
+// identifier sits on the given 1-based line, if any.
+func (tf *TokenizedFile) GenServerCallOnLine(line1 int) (genServerCall, bool) {
+	for i := 0; i < tf.n; i++ {
+		if tf.tokens[i].Kind != parser.TokOpenParen {
+			continue
+		}
+		if gc, ok := parseGenServerCall(tf.source, tf.tokens, tf.n, i); ok && gc.callLine == line1 {
+			return gc, true
+		}
+	}
+	return genServerCall{}, false
+}
+
+// GenServerClauseAt reports the handle_call/handle_cast callback and its
+// first-argument message key when the cursor sits on such a clause head whose
+// first argument is a concrete atom pattern. Wildcard/non-atom patterns and
+// non-handler defs return ok=false.
+func (tf *TokenizedFile) GenServerClauseAt(line, col int) (kind, key string, ok bool) {
+	tokens, source, n := tf.tokens, tf.source, tf.n
+	line1 := line + 1
+	cursorOffset := parser.LineColToOffset(tf.lineStarts, line, col)
+	if cursorOffset < 0 {
+		return "", "", false
+	}
+	for i := 0; i < n; i++ {
+		t := tokens[i]
+		if t.Line != line1 {
+			continue
+		}
+		if t.Kind != parser.TokDef && t.Kind != parser.TokDefp {
+			continue
+		}
+		j := tokNextSig(tokens, n, i+1)
+		if j >= n || tokens[j].Kind != parser.TokIdent {
+			continue
+		}
+		fn := parser.TokenText(source, tokens[j])
+		if fn != "handle_call" && fn != "handle_cast" {
+			continue
+		}
+		pj := tokNextSig(tokens, n, j+1)
+		if pj >= n || tokens[pj].Kind != parser.TokOpenParen {
+			continue
+		}
+		closeIdx := matchCloseParen(tokens, n, pj)
+		if closeIdx < 0 {
+			continue
+		}
+		if cursorOffset < t.Start || cursorOffset > tokens[closeIdx].End {
+			continue
+		}
+		head := parser.CondenseClauseHead(fn, string(source[tokens[pj].Start:tokens[closeIdx].End]))
+		k, wildcard, kok := clausePatternKey(head)
+		if !kok || wildcard {
+			return "", "", false
+		}
+		return fn, k, true
+	}
+	return "", "", false
+}
+
+// clausePatternKey extracts the first-argument message key from a condensed
+// clause head like "handle_call({:put_setting, key, value}, _from, state)".
+// Returns (":atom", false, true) for a concrete atom pattern, ("", true, true)
+// for a wildcard (variable or {var, ...}), and ok=false when no key applies.
+func clausePatternKey(head string) (key string, wildcard bool, ok bool) {
+	open := strings.IndexByte(head, '(')
+	if open < 0 {
+		return "", false, false
+	}
+	s := strings.TrimLeft(head[open+1:], " ")
+	if s == "" {
+		return "", false, false
+	}
+	switch s[0] {
+	case ':':
+		if name := readAtomName(s[1:]); name != "" {
+			return ":" + name, false, true
+		}
+		return "", false, false
+	case '{':
+		inner := strings.TrimLeft(s[1:], " ")
+		if inner == "" {
+			return "", false, false
+		}
+		if inner[0] == ':' {
+			if name := readAtomName(inner[1:]); name != "" {
+				return ":" + name, false, true
+			}
+			return "", false, false
+		}
+		if inner[0] == '_' || (inner[0] >= 'a' && inner[0] <= 'z') {
+			return "", true, true
+		}
+		return "", false, false
+	default:
+		if s[0] == '_' || (s[0] >= 'a' && s[0] <= 'z') {
+			return "", true, true
+		}
+		return "", false, false
+	}
+}
+
+// readAtomName reads a bare atom name (letters, digits, underscore, and a
+// trailing ? or !) from the front of s.
+func readAtomName(s string) string {
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			i++
+			continue
+		}
+		if c == '?' || c == '!' {
+			i++
+		}
+		break
+	}
+	return s[:i]
+}
+
+// messageKeyFromTokens derives a message key from the token range [lo, hi):
+// ":atom" for a bare atom literal, or the first element's atom for a tuple
+// `{:atom, ...}`. Anything else yields "".
+func messageKeyFromTokens(source []byte, tokens []parser.Token, lo, hi int) string {
+	i := lo
+	for i < hi && (tokens[i].Kind == parser.TokEOL || tokens[i].Kind == parser.TokComment) {
+		i++
+	}
+	if i >= hi {
+		return ""
+	}
+	switch tokens[i].Kind {
+	case parser.TokAtom:
+		return parser.TokenText(source, tokens[i])
+	case parser.TokOpenBrace:
+		j := i + 1
+		for j < hi && (tokens[j].Kind == parser.TokEOL || tokens[j].Kind == parser.TokComment) {
+			j++
+		}
+		if j < hi && tokens[j].Kind == parser.TokAtom {
+			return parser.TokenText(source, tokens[j])
+		}
+	}
+	return ""
+}
+
+// argModuleRef returns the module chain written as arg0 of a call, or "" when
+// the argument is __MODULE__, a variable/pid, or anything other than a plain
+// module reference (callers treat "" as "the current module").
+func argModuleRef(source []byte, tokens []parser.Token, n, lo, hi int) string {
+	i := lo
+	for i < hi && (tokens[i].Kind == parser.TokEOL || tokens[i].Kind == parser.TokComment) {
+		i++
+	}
+	if i >= hi || tokens[i].Kind != parser.TokModule {
+		return ""
+	}
+	name, next := parser.CollectModuleName(source, tokens, n, i)
+	if name == "__MODULE__" {
+		return ""
+	}
+	// Reject anything after the chain (e.g. Foo.bar(...) or a via tuple): only a
+	// plain module reference names a target module.
+	for next < hi {
+		if tokens[next].Kind != parser.TokEOL && tokens[next].Kind != parser.TokComment {
+			return ""
+		}
+		next++
+	}
+	return name
+}
+
+// splitArgRanges splits the top-level arguments between the parens at openIdx
+// and closeIdx into [start, end) token-index ranges.
+func splitArgRanges(tokens []parser.Token, openIdx, closeIdx int) [][2]int {
+	var args [][2]int
+	depth := 0
+	start := openIdx + 1
+	for i := openIdx + 1; i < closeIdx; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenParen, parser.TokOpenBrace, parser.TokOpenBracket, parser.TokOpenAngle:
+			depth++
+		case parser.TokCloseParen, parser.TokCloseBrace, parser.TokCloseBracket, parser.TokCloseAngle:
+			depth--
+		case parser.TokComma:
+			if depth == 0 {
+				args = append(args, [2]int{start, i})
+				start = i + 1
+			}
+		}
+	}
+	args = append(args, [2]int{start, closeIdx})
+	return args
+}
+
+// matchCloseParen returns the index of the ')' matching the '(' at open, or -1.
+func matchCloseParen(tokens []parser.Token, n, open int) int {
+	depth := 0
+	for i := open; i < n; i++ {
+		switch tokens[i].Kind {
+		case parser.TokOpenParen:
+			depth++
+		case parser.TokCloseParen:
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // matchCloseBrace returns the index of the '}' matching the '{' at open, or -1.
 func matchCloseBrace(tokens []parser.Token, n, open int) int {
 	depth := 0

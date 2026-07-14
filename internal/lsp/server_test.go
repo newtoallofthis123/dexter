@@ -6303,3 +6303,253 @@ end`)
 		t.Errorf("expected doc content, got %q", hover.Contents.Value)
 	}
 }
+
+// --- GenServer message navigation -------------------------------------------
+
+func TestDefinition_GenServerCallTupleMessage(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	src := `defmodule MyApp.Settings do
+  use GenServer
+
+  def handle_call({:get_setting, key}, _from, state) do
+    {:reply, Map.get(state, key), state}
+  end
+
+  def handle_call({:put_setting, key, value}, _from, state) do
+    {:reply, :ok, Map.put(state, key, value)}
+  end
+
+  def handle_call(:list_settings, _from, state) do
+    {:reply, Map.keys(state), state}
+  end
+
+  def put(key, value) do
+    GenServer.call(__MODULE__, {:put_setting, key, value})
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/settings.ex", src)
+	fileURI := "file://" + filepath.Join(server.projectRoot, "lib/settings.ex")
+	server.docs.Set(fileURI, src)
+
+	// Line 16 is the GenServer.call; cursor on ":put_setting" (col 35).
+	locs := definitionAt(t, server, fileURI, 16, 35)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 clause location, got %d: %+v", len(locs), locs)
+	}
+	if locs[0].Range.Start.Line != 7 {
+		t.Errorf("expected jump to put_setting clause on line 7, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_GenServerCallBareAtomMessage(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	src := `defmodule MyApp.Settings do
+  def handle_call({:put_setting, key, value}, _from, state) do
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:list_settings, _from, state) do
+    {:reply, Map.keys(state), state}
+  end
+
+  def list do
+    GenServer.call(__MODULE__, :list_settings)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/settings.ex", src)
+	fileURI := "file://" + filepath.Join(server.projectRoot, "lib/settings.ex")
+	server.docs.Set(fileURI, src)
+
+	// Line 10 is the GenServer.call; cursor on ":list_settings" (col 32).
+	locs := definitionAt(t, server, fileURI, 10, 32)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 clause location, got %d: %+v", len(locs), locs)
+	}
+	if locs[0].Range.Start.Line != 5 {
+		t.Errorf("expected jump to list_settings clause on line 5, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_GenServerCallWildcardFallback(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	src := `defmodule MyApp.Settings do
+  def handle_call({:known, x}, _from, state) do
+    {:reply, x, state}
+  end
+
+  def handle_call(other, _from, state) do
+    {:reply, {:error, other}, state}
+  end
+
+  def ask do
+    GenServer.call(__MODULE__, :unknown)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/settings.ex", src)
+	fileURI := "file://" + filepath.Join(server.projectRoot, "lib/settings.ex")
+	server.docs.Set(fileURI, src)
+
+	// Line 10 GenServer.call; cursor on ":unknown" (col 32). No concrete clause
+	// matches, so the wildcard clause on line 5 is returned.
+	locs := definitionAt(t, server, fileURI, 10, 32)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 wildcard clause location, got %d: %+v", len(locs), locs)
+	}
+	if locs[0].Range.Start.Line != 5 {
+		t.Errorf("expected jump to wildcard clause on line 5, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_GenServerCallAliasedModule(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	serverSrc := `defmodule MyApp.Server do
+  use GenServer
+
+  def handle_call({:ping, n}, _from, state) do
+    {:reply, n, state}
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/server.ex", serverSrc)
+
+	clientSrc := `defmodule MyApp.Client do
+  alias MyApp.Server
+
+  def ping(n) do
+    GenServer.call(Server, {:ping, n})
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/client.ex", clientSrc)
+	clientURI := "file://" + filepath.Join(server.projectRoot, "lib/client.ex")
+	server.docs.Set(clientURI, clientSrc)
+
+	// Line 4 GenServer.call(Server, {:ping, n}); cursor on ":ping" (col 28).
+	locs := definitionAt(t, server, clientURI, 4, 28)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 cross-module clause location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "server.ex") {
+		t.Errorf("expected jump into server.ex, got %s", locs[0].URI)
+	}
+	if locs[0].Range.Start.Line != 3 {
+		t.Errorf("expected jump to :ping clause on line 3, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_GenServerCallVariableMessageFallsThrough(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	src := `defmodule MyApp.Settings do
+  def handle_call({:put_setting, key, value}, _from, state) do
+    {:reply, :ok, state}
+  end
+
+  def relay(msg) do
+    GenServer.call(__MODULE__, msg)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/settings.ex", src)
+	fileURI := "file://" + filepath.Join(server.projectRoot, "lib/settings.ex")
+	server.docs.Set(fileURI, src)
+
+	// Line 6 GenServer.call(__MODULE__, msg); cursor on "msg" (col 30). The
+	// message is a variable, so the feature must not engage — it must not jump
+	// to the handle_call clause on line 1.
+	locs := definitionAt(t, server, fileURI, 6, 30)
+	for _, l := range locs {
+		if l.Range.Start.Line == 1 {
+			t.Errorf("variable message must not resolve to handle_call clause, got %+v", l)
+		}
+	}
+}
+
+func TestReferences_GenServerClauseCallSites(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	src := `defmodule MyApp.Settings do
+  def handle_call({:put_setting, key, value}, _from, state), do: {:reply, :ok, state}
+  def handle_call({:get_setting, key}, _from, state), do: {:reply, nil, state}
+
+  def put(k, v), do: GenServer.call(__MODULE__, {:put_setting, k, v})
+  def get(k), do: GenServer.call(__MODULE__, {:get_setting, k})
+  def put2(k, v), do: GenServer.call(__MODULE__, {:put_setting, k, v})
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/settings.ex", src)
+	fileURI := "file://" + filepath.Join(server.projectRoot, "lib/settings.ex")
+	server.docs.Set(fileURI, src)
+
+	// Cursor on the :put_setting clause head (line 1), on the atom (col 20).
+	locs := referencesAt(t, server, fileURI, 1, 20)
+
+	gotLines := map[uint32]bool{}
+	for _, l := range locs {
+		gotLines[l.Range.Start.Line] = true
+	}
+	// put (line 4) and put2 (line 6) call with :put_setting; get (line 5) must not appear.
+	if !gotLines[4] || !gotLines[6] {
+		t.Errorf("expected call sites on lines 4 and 6, got %v", gotLines)
+	}
+	if gotLines[5] {
+		t.Errorf("get call site (line 5, :get_setting) must not match :put_setting clause")
+	}
+	if len(locs) != 2 {
+		t.Errorf("expected exactly 2 matching call sites, got %d: %+v", len(locs), locs)
+	}
+}
+
+func TestClausePatternKey(t *testing.T) {
+	cases := []struct {
+		head     string
+		wantKey  string
+		wantWild bool
+		wantOK   bool
+	}{
+		{"handle_call(:get_settings, _from, state)", ":get_settings", false, true},
+		{"handle_call({:put_setting, key, value}, _from, state)", ":put_setting", false, true},
+		{"handle_cast({:notify, ref}, state)", ":notify", false, true},
+		{"handle_call(msg, _from, state)", "", true, true},
+		{"handle_call(_, _from, state)", "", true, true},
+		{"handle_call({key, value}, _from, state)", "", true, true},
+		{"handle_call(%{op: op}, _from, state)", "", false, false},
+		{"handle_call(:done!, _from, state)", ":done!", false, true},
+		{"handle_call", "", false, false},
+	}
+	for _, c := range cases {
+		key, wild, ok := clausePatternKey(c.head)
+		if key != c.wantKey || wild != c.wantWild || ok != c.wantOK {
+			t.Errorf("clausePatternKey(%q) = (%q, %v, %v), want (%q, %v, %v)",
+				c.head, key, wild, ok, c.wantKey, c.wantWild, c.wantOK)
+		}
+	}
+}
+
+func TestMessageKeyFromTokens(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want string
+	}{
+		{":ping", ":ping"},
+		{"{:put_setting, key, value}", ":put_setting"},
+		{"{ :spaced, x }", ":spaced"},
+		{"msg", ""},
+		{"{key, value}", ""},
+		{"%{a: 1}", ""},
+		{"@attr", ""},
+	}
+	for _, c := range cases {
+		tf := NewTokenizedFile(c.msg)
+		got := messageKeyFromTokens(tf.source, tf.tokens, 0, tf.n)
+		if got != c.want {
+			t.Errorf("messageKeyFromTokens(%q) = %q, want %q", c.msg, got, c.want)
+		}
+	}
+}
