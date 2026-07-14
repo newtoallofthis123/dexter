@@ -66,21 +66,46 @@ defmodule Dexter.Diag do
   # Runs `mix compile` and returns the full current diagnostic set. Mix.Task.clear/0
   # is required before each rerun in a long-lived VM: without it a second compile
   # of the same project is a :noop and Mix.Task.Compiler.diagnostics/0 keeps
-  # returning stale entries. diagnostics/0 reads the persisted manifest, so it
-  # reports warnings for files that were not recompiled this round too.
+  # returning stale entries.
+  #
+  # Two diagnostic sources are merged: the rerun's own return value carries the
+  # errors from files that FAILED to compile (those never reach the manifest),
+  # while Mix.Task.Compiler.diagnostics/0 reads the persisted manifest and so
+  # replays warnings for files that were not recompiled this round.
   def compile(mix_exs) do
     try do
-      with_stdout_to_stderr(fn ->
-        Mix.Task.clear()
-        Mix.Task.rerun("compile", ["--return-errors", "--all-warnings"])
-      end)
+      result =
+        with_stdout_to_stderr(fn ->
+          Mix.Task.clear()
+          Mix.Task.rerun("compile", ["--return-errors", "--all-warnings"])
+        end)
 
-      encode(Mix.Task.Compiler.diagnostics())
+      returned =
+        case result do
+          {_status, diags} when is_list(diags) -> diags
+          _ -> []
+        end
+
+      manifest =
+        try do
+          Mix.Task.Compiler.diagnostics()
+        rescue
+          _ -> []
+        end
+
+      encode(dedupe(returned ++ manifest))
     rescue
       e -> encode([boot_error_diagnostic(mix_exs, Exception.message(e))])
     catch
       kind, reason -> encode([boot_error_diagnostic(mix_exs, "#{kind}: #{inspect(reason)}")])
     end
+  end
+
+  defp dedupe(diagnostics) do
+    diagnostics
+    |> Enum.uniq_by(fn d ->
+      {diag_field(d, :file), diag_field(d, :position), diag_field(d, :message)}
+    end)
   end
 
   # The compiler and Mix tasks write progress ("Compiling N files", "Generated
@@ -237,14 +262,26 @@ boot =
     # Suppress Mix's own status output ("Compiling ...", "Generated ...") which
     # would otherwise be written to the stdout binary protocol.
     Mix.shell(Mix.Shell.Quiet)
+    # Recompiles in a long-lived VM redefine modules that are already loaded
+    # from the previous round; without this every warm compile floods the
+    # diagnostics with "redefining module" warnings.
+    Code.put_compiler_option(:ignore_module_conflict, true)
+
     # Compiling mix.exs runs `use Mix.Project`, whose @after_compile hook pushes
     # the project onto the Mix stack — the minimal way to load a project without
     # the mix CLI. loadpaths/deps are handled later by the compile task.
     Code.compile_file(mix_exs)
 
     case Mix.Project.get() do
-      nil -> {:error, "no Mix project defined in #{mix_exs}"}
-      _module -> :ok
+      nil ->
+        {:error, "no Mix project defined in #{mix_exs}"}
+
+      _module ->
+        # The mix CLI loads config/config.exs before any task; libraries like
+        # ueberauth read app config at compile time and crash the compile if it
+        # is missing. Mirror the CLI here.
+        Mix.Task.run("loadconfig")
+        :ok
     end
   rescue
     e -> {:error, Exception.message(e)}
