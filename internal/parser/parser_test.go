@@ -77,16 +77,21 @@ end
 	}
 
 	funcDefs := 0
+	heads := map[string]bool{}
 	for _, d := range defs {
 		if d.Function == "process_event" {
 			funcDefs++
 			if d.Module != "MyApp.Webhooks" || d.Kind != "def" {
 				t.Errorf("unexpected process_event def: %+v", d)
 			}
+			heads[d.Head] = true
 		}
 	}
 	if funcDefs != 3 {
 		t.Errorf("expected 3 process_event heads, got %d", funcDefs)
+	}
+	if !heads[`process_event("completed", payload)`] {
+		t.Errorf("expected condensed clause head for first clause, got heads %v", heads)
 	}
 }
 

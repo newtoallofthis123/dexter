@@ -1234,6 +1234,42 @@ end
 	}
 }
 
+// TestSearchSymbolsHead verifies that a definition's condensed clause head is
+// stored and returned through SearchSymbols.
+func TestSearchSymbolsHead(t *testing.T) {
+	s, dir := setupTestStore(t)
+	defer func() { _ = s.Close() }()
+
+	path := writeElixirFile(t, dir, "lib/server.ex", `defmodule MyApp.Server do
+  def handle_call(:get, _from, state), do: {:reply, state, state}
+end
+`)
+	defs, _, err := parser.ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IndexFile(path, defs); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.SearchSymbols("handle_call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range results {
+		if r.Function == "handle_call" {
+			found = true
+			if r.Head != "handle_call(:get, _from, state)" {
+				t.Errorf("expected head %q, got %q", "handle_call(:get, _from, state)", r.Head)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find handle_call function")
+	}
+}
+
 func TestFindProjectRoot(t *testing.T) {
 	// Helper: create a directory tree inside t.TempDir() and return the root.
 	mktree := func(t *testing.T, files []string) string {

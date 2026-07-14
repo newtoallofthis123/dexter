@@ -3052,7 +3052,7 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 			clauseName := ""
 			if j < n && tokens[j].Kind == parser.TokOpenParen &&
 				paramsEnd > j+1 && paramsEnd <= n && tokens[paramsEnd-1].Kind == parser.TokCloseParen {
-				clauseName = condenseClauseHead(funcName, string(source[tokens[j].Start:tokens[paramsEnd-1].End]))
+				clauseName = parser.CondenseClauseHead(funcName, string(source[tokens[j].Start:tokens[paramsEnd-1].End]))
 			}
 
 			_, nextPos, hasDoBlock := parser.ScanForwardToBlockDo(tokens, n, j)
@@ -3356,19 +3356,6 @@ func (s *Server) DocumentSymbol(ctx context.Context, params *protocol.DocumentSy
 		result = append(result, buildSymbol(idx))
 	}
 	return result, nil
-}
-
-// condenseClauseHead builds a display name like
-// "handle_call(:get_settings, _from, state)" from a function name and the raw
-// source of its parameter list (parens included), collapsing whitespace and
-// truncating long heads.
-func condenseClauseHead(funcName, params string) string {
-	head := funcName + strings.Join(strings.Fields(params), " ")
-	const maxLen = 80
-	if runes := []rune(head); len(runes) > maxLen {
-		head = string(runes[:maxLen-1]) + "…"
-	}
-	return head
 }
 
 func defKindToSymbolKind(kind string) protocol.SymbolKind {
@@ -5336,13 +5323,26 @@ func (s *Server) Symbols(ctx context.Context, params *protocol.WorkspaceSymbolPa
 		return nil, err
 	}
 
+	// Count how many rows share a module.function/arity key so multi-clause
+	// functions can be disambiguated by their condensed clause head.
+	keyCounts := make(map[string]int)
+	for _, r := range results {
+		if r.Function != "" {
+			keyCounts[fmt.Sprintf("%s.%s/%d", r.Module, r.Function, r.Arity)]++
+		}
+	}
+
 	var symbols []protocol.SymbolInformation
 	for _, r := range results {
 		name := r.Module
 		containerName := ""
 		if r.Function != "" {
-			name = fmt.Sprintf("%s.%s/%d", r.Module, r.Function, r.Arity)
+			key := fmt.Sprintf("%s.%s/%d", r.Module, r.Function, r.Arity)
+			name = key
 			containerName = r.Module
+			if keyCounts[key] > 1 && r.Head != "" {
+				name = fmt.Sprintf("%s.%s", r.Module, r.Head)
+			}
 		}
 
 		symbols = append(symbols, protocol.SymbolInformation{

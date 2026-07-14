@@ -7,6 +7,19 @@ import (
 	"strings"
 )
 
+// CondenseClauseHead builds a display name like
+// "handle_call(:get_settings, _from, state)" from a function name and the raw
+// source of its parameter list (parens included), collapsing whitespace and
+// truncating long heads.
+func CondenseClauseHead(funcName, params string) string {
+	head := funcName + strings.Join(strings.Fields(params), " ")
+	const maxLen = 80
+	if runes := []rune(head); len(runes) > maxLen {
+		head = string(runes[:maxLen-1]) + "…"
+	}
+	return head
+}
+
 // IsElixirKeyword returns true if the name is an Elixir language keyword
 // (control flow or definition keyword) rather than a user-defined macro.
 func IsElixirKeyword(name string) bool {
@@ -40,6 +53,7 @@ type Definition struct {
 	DelegateTo string
 	DelegateAs string // for defdelegate with as: — the function name in the target module
 	Params     string // comma-separated parameter names for this arity
+	Head       string // condensed clause head, e.g. "handle_call(:get, _from, state)"
 }
 
 type Reference struct {

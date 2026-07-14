@@ -202,6 +202,7 @@ func migrate(db *sql.DB) error {
 			delegate_to TEXT NOT NULL DEFAULT '',
 			delegate_as TEXT NOT NULL DEFAULT '',
 			params TEXT NOT NULL DEFAULT '',
+			head TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (file_path) REFERENCES files(path) ON DELETE CASCADE
 		);
 
@@ -338,14 +339,14 @@ func (s *Store) IndexFileWithRefs(path string, defs []parser.Definition, refs []
 		return err
 	}
 
-	defStmt, err := tx.Prepare("INSERT INTO definitions (module, function, arity, kind, line, file_path, delegate_to, delegate_as, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	defStmt, err := tx.Prepare("INSERT INTO definitions (module, function, arity, kind, line, file_path, delegate_to, delegate_as, params, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = defStmt.Close() }()
 
 	for _, d := range defs {
-		if _, err := defStmt.Exec(d.Module, d.Function, d.Arity, d.Kind, d.Line, d.FilePath, d.DelegateTo, d.DelegateAs, d.Params); err != nil {
+		if _, err := defStmt.Exec(d.Module, d.Function, d.Arity, d.Kind, d.Line, d.FilePath, d.DelegateTo, d.DelegateAs, d.Params, d.Head); err != nil {
 			return err
 		}
 	}
@@ -396,7 +397,7 @@ func (s *Store) beginBatch(insertOnly bool) (*Batch, error) {
 		return nil, err
 	}
 
-	defStmt, err := tx.Prepare("INSERT INTO definitions (module, function, arity, kind, line, file_path, delegate_to, delegate_as, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	defStmt, err := tx.Prepare("INSERT INTO definitions (module, function, arity, kind, line, file_path, delegate_to, delegate_as, params, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -474,7 +475,7 @@ func (b *Batch) indexFile(path string, mtimeNano int64, defs []parser.Definition
 	}
 
 	for _, d := range defs {
-		if _, err := b.defStmt.Exec(d.Module, d.Function, d.Arity, d.Kind, d.Line, d.FilePath, d.DelegateTo, d.DelegateAs, d.Params); err != nil {
+		if _, err := b.defStmt.Exec(d.Module, d.Function, d.Arity, d.Kind, d.Line, d.FilePath, d.DelegateTo, d.DelegateAs, d.Params, d.Head); err != nil {
 			return err
 		}
 	}
@@ -564,6 +565,7 @@ type CompletionResult struct {
 	FilePath string
 	Line     int
 	Params   string
+	Head     string
 }
 
 // SearchModulesBySuffix returns modules whose name ends with the given suffix.
@@ -1082,7 +1084,7 @@ func (s *Store) SearchSymbols(query string, excludePathPrefix ...string) ([]Comp
 		args := append([]interface{}{modulePart, suffixPart, suffixPart}, extraArgs...)
 		args = append(args, query, query)
 		rows, err = s.db.Query(
-			"SELECT module, function, arity, kind, file_path, line FROM definitions WHERE module LIKE ? AND (function LIKE ? OR module LIKE ?)"+pathFilter+
+			"SELECT module, function, arity, kind, file_path, line, head FROM definitions WHERE module LIKE ? AND (function LIKE ? OR module LIKE ?)"+pathFilter+
 				" ORDER BY CASE WHEN module = ? THEN 0 WHEN INSTR(module || '.' || function, ?) > 0 THEN 1 ELSE 2 END, module, function LIMIT 50",
 			args...,
 		)
@@ -1091,7 +1093,7 @@ func (s *Store) SearchSymbols(query string, excludePathPrefix ...string) ([]Comp
 		args := append([]interface{}{pattern, pattern}, extraArgs...)
 		args = append(args, query, query, query)
 		rows, err = s.db.Query(
-			"SELECT module, function, arity, kind, file_path, line FROM definitions WHERE (module LIKE ? OR function LIKE ?)"+pathFilter+
+			"SELECT module, function, arity, kind, file_path, line, head FROM definitions WHERE (module LIKE ? OR function LIKE ?)"+pathFilter+
 				" ORDER BY CASE WHEN module = ? THEN 0 WHEN INSTR(module, ?) > 0 OR INSTR(function, ?) > 0 THEN 1 ELSE 2 END, module, function LIMIT 50",
 			args...,
 		)
@@ -1105,7 +1107,7 @@ func (s *Store) SearchSymbols(query string, excludePathPrefix ...string) ([]Comp
 	var results []CompletionResult
 	for rows.Next() {
 		var r CompletionResult
-		if err := rows.Scan(&r.Module, &r.Function, &r.Arity, &r.Kind, &r.FilePath, &r.Line); err != nil {
+		if err := rows.Scan(&r.Module, &r.Function, &r.Arity, &r.Kind, &r.FilePath, &r.Line, &r.Head); err != nil {
 			return nil, err
 		}
 		results = append(results, r)

@@ -13,3 +13,4 @@ dist/
 
 # VS Code
 .vscode/
+erl_crash.dump

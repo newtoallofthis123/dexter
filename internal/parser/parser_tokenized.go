@@ -321,9 +321,14 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 				maxArity := 0
 				defaultCount := 0
 				var paramNames []string
+				var head string
 				if pj < n && tokens[pj].Kind == TokOpenParen {
+					openIdx := pj
 					maxArity, defaultCount, paramNames, pj = collectParamsFromTokens(pj)
 					paramNames = fixParamNames(paramNames)
+					if pj > openIdx+1 && pj <= n && tokens[pj-1].Kind == TokCloseParen {
+						head = CondenseClauseHead(funcName, string(source[tokens[openIdx].Start:tokens[pj-1].End]))
+					}
 				}
 
 				var delegateTo, delegateAs string
@@ -344,6 +349,7 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 						DelegateTo: delegateTo,
 						DelegateAs: delegateAs,
 						Params:     params,
+						Head:       head,
 					})
 				}
 				i = j

@@ -4811,6 +4811,59 @@ end
 	}
 }
 
+func TestWorkspaceSymbol_MultiClauseHeads(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	indexFile(t, server.store, server.projectRoot, "lib/server.ex", `defmodule MyApp.Server do
+  def handle_call(:a, _from, state), do: {:reply, :a, state}
+  def handle_call(:b, _from, state), do: {:reply, :b, state}
+  def foo(x), do: x
+end
+`)
+
+	// The two handle_call/3 clauses should be disambiguated by their heads.
+	results := workspaceSymbols(t, server, "handle_call")
+	var names []string
+	for _, r := range results {
+		if r.ContainerName == "MyApp.Server" {
+			names = append(names, r.Name)
+		}
+	}
+	wantA := "MyApp.Server.handle_call(:a, _from, state)"
+	wantB := "MyApp.Server.handle_call(:b, _from, state)"
+	foundA, foundB := false, false
+	for _, n := range names {
+		if n == wantA {
+			foundA = true
+		}
+		if n == wantB {
+			foundB = true
+		}
+		if n == "MyApp.Server.handle_call/3" {
+			t.Errorf("expected disambiguated clause head, got plain %q", n)
+		}
+	}
+	if !foundA {
+		t.Errorf("expected to find %q, got %v", wantA, names)
+	}
+	if !foundB {
+		t.Errorf("expected to find %q, got %v", wantB, names)
+	}
+
+	// The single-clause function keeps the module.function/arity form.
+	results = workspaceSymbols(t, server, "foo")
+	found := false
+	for _, r := range results {
+		if r.Name == "MyApp.Server.foo/1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected single-clause foo to keep MyApp.Server.foo/1 name")
+	}
+}
+
 func TestWorkspaceSymbol_EmptyQuery(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
