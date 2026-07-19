@@ -6553,3 +6553,222 @@ func TestMessageKeyFromTokens(t *testing.T) {
 		}
 	}
 }
+
+// --- impl() receiver navigation ---------------------------------------------
+
+func TestDefinition_ImplReceiverGetEnvDefault(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	mailerSrc := `defmodule MyApp.Mailer do
+  def deliver(msg), do: msg
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/mailer.ex", mailerSrc)
+
+	notifierSrc := `defmodule MyApp.Notifier do
+  defp impl, do: Application.get_env(:my_app, :mailer, MyApp.Mailer)
+
+  def send_email(msg) do
+    impl().deliver(msg)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/notifier.ex", notifierSrc)
+	notifierURI := "file://" + filepath.Join(server.projectRoot, "lib/notifier.ex")
+	server.docs.Set(notifierURI, notifierSrc)
+
+	// Line 4 is impl().deliver(msg); cursor on "deliver" (col 12).
+	locs := definitionAt(t, server, notifierURI, 4, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "mailer.ex") {
+		t.Errorf("expected jump into mailer.ex, got %s", locs[0].URI)
+	}
+	if locs[0].Range.Start.Line != 1 {
+		t.Errorf("expected jump to deliver on line 1, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_ImplReceiverDirectModuleBlockBody(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	workerSrc := `defmodule SharedLib.Worker do
+  def perform(job), do: job
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/worker.ex", workerSrc)
+
+	runnerSrc := `defmodule MyApp.Runner do
+  defp impl do
+    SharedLib.Worker
+  end
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	// Line 6 is impl().perform(job); cursor on "perform" (col 12).
+	locs := definitionAt(t, server, runnerURI, 6, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "worker.ex") {
+		t.Errorf("expected jump into worker.ex, got %s", locs[0].URI)
+	}
+	if locs[0].Range.Start.Line != 1 {
+		t.Errorf("expected jump to perform on line 1, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_ImplReceiverOrFallback(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	workerSrc := `defmodule SharedLib.Worker do
+  def perform(job), do: job
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/worker.ex", workerSrc)
+
+	runnerSrc := `defmodule MyApp.Runner do
+  defp impl, do: Application.get_env(:my_app, :worker) || SharedLib.Worker
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	locs := definitionAt(t, server, runnerURI, 4, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "worker.ex") {
+		t.Errorf("expected jump into worker.ex, got %s", locs[0].URI)
+	}
+}
+
+func TestDefinition_ImplReceiverModuleAttribute(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	workerSrc := `defmodule SharedLib.Worker do
+  def perform(job), do: job
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/worker.ex", workerSrc)
+
+	runnerSrc := `defmodule MyApp.Runner do
+  @worker Application.compile_env(:my_app, :worker, SharedLib.Worker)
+
+  defp impl, do: @worker
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	locs := definitionAt(t, server, runnerURI, 6, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "worker.ex") {
+		t.Errorf("expected jump into worker.ex, got %s", locs[0].URI)
+	}
+	if locs[0].Range.Start.Line != 1 {
+		t.Errorf("expected jump to perform on line 1, got line %d", locs[0].Range.Start.Line)
+	}
+}
+
+func TestDefinition_ImplReceiverAliasedDefault(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	workerSrc := `defmodule SharedLib.Worker do
+  def perform(job), do: job
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/worker.ex", workerSrc)
+
+	runnerSrc := `defmodule MyApp.Runner do
+  alias SharedLib.Worker
+
+  defp impl, do: Application.get_env(:my_app, :worker, Worker)
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	locs := definitionAt(t, server, runnerURI, 6, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "worker.ex") {
+		t.Errorf("expected jump into worker.ex, got %s", locs[0].URI)
+	}
+}
+
+func TestDefinition_ImplReceiverUnresolvableReturnsNothing(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	runnerSrc := `defmodule MyApp.Runner do
+  defp impl, do: Application.fetch_env!(:my_app, :worker)
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	locs := definitionAt(t, server, runnerURI, 4, 12)
+	if len(locs) != 0 {
+		t.Fatalf("expected no locations for unresolvable impl(), got %d: %+v", len(locs), locs)
+	}
+}
+
+func TestDefinition_ImplReceiverImportedHelper(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	workerSrc := `defmodule SharedLib.Worker do
+  def perform(job), do: job
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/worker.ex", workerSrc)
+
+	sharedSrc := `defmodule MyApp.Shared do
+  def impl, do: Application.get_env(:my_app, :worker, SharedLib.Worker)
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/shared.ex", sharedSrc)
+
+	runnerSrc := `defmodule MyApp.Runner do
+  import MyApp.Shared
+
+  def run(job) do
+    impl().perform(job)
+  end
+end`
+	indexFile(t, server.store, server.projectRoot, "lib/runner.ex", runnerSrc)
+	runnerURI := "file://" + filepath.Join(server.projectRoot, "lib/runner.ex")
+	server.docs.Set(runnerURI, runnerSrc)
+
+	locs := definitionAt(t, server, runnerURI, 4, 12)
+	if len(locs) != 1 {
+		t.Fatalf("expected 1 location, got %d: %+v", len(locs), locs)
+	}
+	if !strings.Contains(string(locs[0].URI), "worker.ex") {
+		t.Errorf("expected jump into worker.ex, got %s", locs[0].URI)
+	}
+}

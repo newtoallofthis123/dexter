@@ -816,6 +816,176 @@ func prevSigToken(tokens []parser.Token, from int) int {
 	return from
 }
 
+// --- impl() receiver navigation ---------------------------------------------
+//
+// These helpers power go-to-definition through the dynamic-dispatch pattern
+// `impl().func(...)`, where `impl` is a bare zero-arity function returning a
+// module — typically `Application.get_env(:app, :key, Default)` for Mox-style
+// implementation swapping. Like the GenServer navigation above they are
+// deliberately heuristic: they engage only on the idiomatic shape and fall
+// through cleanly otherwise.
+
+// ImplCallAtCursor reports the receiver and function names when the cursor is
+// on `func` in a bare zero-arity receiver call `recv().func`.
+func (tf *TokenizedFile) ImplCallAtCursor(line, col int) (receiver, function string, ok bool) {
+	offset := parser.LineColToOffset(tf.lineStarts, line, col)
+	if offset < 0 {
+		return "", "", false
+	}
+	idx := parser.TokenAtOffset(tf.tokens, offset)
+	if idx < 0 {
+		idx = parser.TokenAtOffset(tf.tokens, offset-1)
+	}
+	if idx < 0 || tf.tokens[idx].Kind != parser.TokIdent {
+		return "", "", false
+	}
+	dot := prevSigToken(tf.tokens, idx-1)
+	if dot < 0 || tf.tokens[dot].Kind != parser.TokDot {
+		return "", "", false
+	}
+	closeIdx := prevSigToken(tf.tokens, dot-1)
+	if closeIdx < 0 || tf.tokens[closeIdx].Kind != parser.TokCloseParen {
+		return "", "", false
+	}
+	openIdx := prevSigToken(tf.tokens, closeIdx-1)
+	if openIdx < 0 || tf.tokens[openIdx].Kind != parser.TokOpenParen {
+		return "", "", false
+	}
+	recv := prevSigToken(tf.tokens, openIdx-1)
+	if recv < 0 || tf.tokens[recv].Kind != parser.TokIdent {
+		return "", "", false
+	}
+	// Bare calls only: Module.impl().func is out of scope.
+	if before := prevSigToken(tf.tokens, recv-1); before >= 0 && tf.tokens[before].Kind == parser.TokDot {
+		return "", "", false
+	}
+	return parser.TokenText(tf.source, tf.tokens[recv]), parser.TokenText(tf.source, tf.tokens[idx]), true
+}
+
+// ImplFunctionBodyRange locates a zero-arity def/defp clause named funcName
+// and returns the half-open token range of its body plus the 0-based def line.
+// Both `do:` keyword bodies and do...end blocks are handled.
+func (tf *TokenizedFile) ImplFunctionBodyRange(funcName string) (start, end, defLine int, ok bool) {
+	for i := 0; i < tf.n; i++ {
+		if k := tf.tokens[i].Kind; k != parser.TokDef && k != parser.TokDefp {
+			continue
+		}
+		j := tokNextSig(tf.tokens, tf.n, i+1)
+		if j >= tf.n || tf.tokens[j].Kind != parser.TokIdent || parser.TokenText(tf.source, tf.tokens[j]) != funcName {
+			continue
+		}
+		defLine = tf.tokens[i].Line - 1
+
+		k := tokNextSig(tf.tokens, tf.n, j+1)
+		// Optional empty parens: impl()
+		if k < tf.n && tf.tokens[k].Kind == parser.TokOpenParen {
+			c := tokNextSig(tf.tokens, tf.n, k+1)
+			if c >= tf.n || tf.tokens[c].Kind != parser.TokCloseParen {
+				continue // has params — not zero-arity
+			}
+			k = tokNextSig(tf.tokens, tf.n, c+1)
+		}
+		if k >= tf.n {
+			return 0, 0, 0, false
+		}
+
+		switch tf.tokens[k].Kind {
+		case parser.TokComma:
+			// Keyword form: defp impl, do: EXPR
+			d := tokNextSig(tf.tokens, tf.n, k+1)
+			if d >= tf.n || tf.tokens[d].Kind != parser.TokIdent || parser.TokenText(tf.source, tf.tokens[d]) != "do" {
+				continue
+			}
+			c := tokNextSig(tf.tokens, tf.n, d+1)
+			if c >= tf.n || tf.tokens[c].Kind != parser.TokColon {
+				continue
+			}
+			return c + 1, tf.statementEnd(c + 1), defLine, true
+		case parser.TokDo:
+			// Block form: defp impl do ... end
+			depth := 1
+			for e := k + 1; e < tf.n; e++ {
+				switch tf.tokens[e].Kind {
+				case parser.TokDo, parser.TokFn:
+					depth++
+				case parser.TokEnd:
+					depth--
+					if depth == 0 {
+						return k + 1, e, defLine, true
+					}
+				}
+			}
+			return k + 1, tf.n, defLine, true
+		}
+	}
+	return 0, 0, 0, false
+}
+
+// statementEnd returns the index of the first EOL token at bracket depth zero
+// at or after from — the end of a single-line (possibly paren-continued)
+// statement body.
+func (tf *TokenizedFile) statementEnd(from int) int {
+	depth := 0
+	for i := from; i < tf.n; i++ {
+		switch tf.tokens[i].Kind {
+		case parser.TokOpenParen, parser.TokOpenBracket, parser.TokOpenBrace:
+			depth++
+		case parser.TokCloseParen, parser.TokCloseBracket, parser.TokCloseBrace:
+			depth--
+		case parser.TokEOL:
+			if depth <= 0 {
+				return i
+			}
+		}
+	}
+	return tf.n
+}
+
+// ImplModuleCandidates collects module literals in the token range [start, end)
+// that are not call receivers (e.g. skips `Application` in Application.get_env
+// but keeps the `MyApp.Mailer` default argument). One level of module-attribute
+// indirection is chased when chaseAttrs is true.
+func (tf *TokenizedFile) ImplModuleCandidates(start, end int, chaseAttrs bool) []string {
+	var candidates []string
+	for i := start; i < end && i < tf.n; {
+		switch tf.tokens[i].Kind {
+		case parser.TokModule:
+			name, next := parser.CollectModuleName(tf.source, tf.tokens, tf.n, i)
+			if next+1 < tf.n && tf.tokens[next].Kind == parser.TokDot && tf.tokens[next+1].Kind == parser.TokIdent {
+				i = next + 2 // call receiver — skip the chain and function name
+				continue
+			}
+			candidates = append(candidates, name)
+			i = next
+		case parser.TokAttr:
+			if chaseAttrs {
+				candidates = append(candidates, tf.attrValueModuleCandidates(parser.TokenText(tf.source, tf.tokens[i]))...)
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return candidates
+}
+
+// attrValueModuleCandidates finds the definition site of attrText (e.g.
+// "@worker") and collects module candidates from its assigned value.
+func (tf *TokenizedFile) attrValueModuleCandidates(attrText string) []string {
+	for j := 0; j < tf.n; j++ {
+		t := tf.tokens[j]
+		if t.Kind != parser.TokAttr || parser.TokenText(tf.source, t) != attrText {
+			continue
+		}
+		// A definition has a value token on the same line after the @attr.
+		k := j + 1
+		if k < tf.n && tf.tokens[k].Kind != parser.TokEOL && tf.tokens[k].Kind != parser.TokComment && tf.tokens[k].Line == t.Line {
+			return tf.ImplModuleCandidates(k, tf.statementEnd(k), false)
+		}
+	}
+	return nil
+}
+
 // isEqualsToken reports whether t is a bare '=' match/assignment operator.
 func isEqualsToken(source []byte, t parser.Token) bool {
 	return t.Kind == parser.TokOther && t.End-t.Start == 1 && source[t.Start] == '='

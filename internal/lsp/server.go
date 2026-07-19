@@ -707,6 +707,14 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		return locs, nil
 	}
 
+	// impl().func() dynamic-receiver call → definition of func on the module
+	// impl() returns (Mox/adapter pattern). When the pattern engages it owns
+	// the cursor even on a miss: an ident after `().` is a remote call, which
+	// the bare-identifier path below would misresolve as a variable or local.
+	if locs, engaged := s.implReceiverDefinition(tf, params.TextDocument.URI, text, lineNum, col); engaged {
+		return locs, nil
+	}
+
 	exprCtx := tf.ExpressionAtCursor(lineNum, col)
 	if exprCtx.Empty() {
 		return nil, nil
@@ -832,6 +840,74 @@ func (s *Server) Definition(ctx context.Context, params *protocol.DefinitionPara
 		return nil, nil
 	}
 	return storeResultsToLocations(results), nil
+}
+
+// implReceiverDefinition implements go-to-definition through the
+// `impl().func()` dynamic-dispatch pattern: it resolves the module(s) the
+// zero-arity receiver returns and looks func up on them. Candidates that don't
+// define func are dropped. engaged reports whether the cursor matched the
+// pattern at all — on a match with no resolution the caller returns nothing
+// rather than falling through to a wrong jump.
+func (s *Server) implReceiverDefinition(tf *TokenizedFile, docURI protocol.DocumentURI, text string, lineNum, col int) (locs []protocol.Location, engaged bool) {
+	recv, fn, ok := tf.ImplCallAtCursor(lineNum, col)
+	if !ok {
+		return nil, false
+	}
+	filePath := uriToPath(docURI)
+	s.debugf("Definition: impl-receiver call %s().%s", recv, fn)
+
+	srcTF, srcPath := tf, filePath
+	start, end, defLine, found := tf.ImplFunctionBodyRange(recv)
+	if !found {
+		// The receiver may come from an import — resolve it and load its file.
+		aliases := tf.ExtractAliasesInScope(lineNum)
+		s.mergeAliasesFromUseTokenized(tf, aliases)
+		mod := s.resolveBareFunctionModule(filePath, text, tf, lineNum, recv, aliases)
+		if mod == "" {
+			return nil, true
+		}
+		results, err := s.store.LookupFunction(mod, recv)
+		if err != nil || len(results) == 0 {
+			return nil, true
+		}
+		otherText, loaded := s.docs.GetOrLoad("file://" + results[0].FilePath)
+		if !loaded {
+			return nil, true
+		}
+		srcTF, srcPath = NewTokenizedFile(otherText), results[0].FilePath
+		start, end, defLine, found = srcTF.ImplFunctionBodyRange(recv)
+		if !found {
+			return nil, true
+		}
+	}
+
+	candidates := srcTF.ImplModuleCandidates(start, end, true)
+	if len(candidates) == 0 {
+		return nil, true
+	}
+	aliases := srcTF.ExtractAliasesInScope(defLine)
+	s.mergeAliasesFromUseTokenized(srcTF, aliases)
+
+	seen := make(map[string]bool, len(candidates))
+	for _, cand := range candidates {
+		full := s.resolveModuleWithNesting(cand, aliases, srcPath, defLine)
+		if full == "" || seen[full] {
+			continue
+		}
+		seen[full] = true
+		var results []store.LookupResult
+		var err error
+		if s.followDelegates {
+			results, err = s.store.LookupFollowDelegate(full, fn)
+		} else {
+			results, err = s.store.LookupFunction(full, fn)
+		}
+		if err == nil {
+			locs = append(locs, storeResultsToLocations(filterOutTypes(results))...)
+		}
+	}
+	s.debugf("Definition: impl-receiver %s() -> candidates %v, %d location(s)", recv, candidates, len(locs))
+	return locs, true
 }
 
 // genServerCallDefinition implements go-to-definition from a GenServer.call/cast
